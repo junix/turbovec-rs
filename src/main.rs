@@ -1,7 +1,7 @@
 //! turbovec-rs — Persistent vector index CLI with semantic search.
 //!
-//! Uses turbovec for 2-4bit quantized vector storage and the embeddings crate
-//! for generating embeddings via Ollama / BGE-M3 (or any supported provider).
+//! Uses turbovec for 2-4bit quantized vector storage, chonkie for chunking,
+//! and the embeddings crate for generating embeddings via Ollama / BGE-M3.
 //!
 //! # Examples
 //!
@@ -10,16 +10,20 @@
 //! turbovec-rs init --index /tmp/docs.tvim
 //!
 //! # Add documents (one per line)
-//! turbovec-rs add --index /tmp/docs.tvim --file docs.txt
+//! turbovec-rs add --index /tmp/docs.tvim --file docs.txt --provider ollama
+//!
+//! # Add with chunking (split long texts into ~500 char chunks)
+//! turbovec-rs add --index /tmp/docs.tvim --file article.md --provider ollama --chunk-size 500
 //!
 //! # Search
-//! turbovec-rs search --index /tmp/docs.tvim --query "什么是编程"
+//! turbovec-rs search --index /tmp/docs.tvim --query "什么是编程" --provider ollama
 //!
 //! # Show index info
 //! turbovec-rs info --index /tmp/docs.tvim
 //! ```
 
 use anyhow::{bail, Context, Result};
+use chonkie::{CharChunker, Chunker, RecursiveChunker, RecursiveRules, SentenceChunker, TiktokenTokenizer};
 use clap::{Parser, Subcommand};
 use embeddings::{resolve_api_key_for_provider, EmbedClient};
 use serde::{Deserialize, Serialize};
@@ -36,11 +40,23 @@ use turbovec::IdMapIndex;
 #[command(
     name = "turbovec-rs",
     version = "0.1.0",
-    about = "Persistent vector index with semantic search (turbovec + embeddings)"
+    about = "Persistent vector index with semantic search (turbovec + embeddings + chonkie)"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum ChunkStrategy {
+    /// One document per line (no chunking, default)
+    Line,
+    /// Fixed-size character chunks
+    Char,
+    /// Sentence-boundary chunks
+    Sentence,
+    /// Recursive: paragraph → sentence → word
+    Recursive,
 }
 
 #[derive(Subcommand)]
@@ -57,12 +73,12 @@ enum Commands {
         #[arg(long, default_value_t = 4)]
         bits: usize,
     },
-    /// Add documents from a file (one per line) to the index
+    /// Add documents from a file to the index
     Add {
         /// Path to the index file (.tvim)
         #[arg(long)]
         index: PathBuf,
-        /// Text file to ingest (one document per line)
+        /// Text file to ingest
         #[arg(long)]
         file: PathBuf,
         /// Embedding model [default: bge-m3]
@@ -77,6 +93,15 @@ enum Commands {
         /// Batch size for embedding API calls
         #[arg(long, default_value_t = 32)]
         batch_size: usize,
+        /// Chunking strategy
+        #[arg(long, default_value = "line")]
+        chunk: ChunkStrategy,
+        /// Chunk size in characters (for char/recursive strategies)
+        #[arg(long, default_value_t = 500)]
+        chunk_size: usize,
+        /// Overlap between chunks in characters
+        #[arg(long, default_value_t = 50)]
+        chunk_overlap: usize,
     },
     /// Search the index with a text query
     Search {
@@ -157,7 +182,10 @@ fn load_texts(index: &Path) -> Result<HashMap<u64, String>> {
         }
         let entry: serde_json::Value = serde_json::from_str(line)?;
         if let (Some(id), Some(text)) = (entry.get("id"), entry.get("text")) {
-            map.insert(id.as_u64().unwrap_or(0), text.as_str().unwrap_or("").to_string());
+            map.insert(
+                id.as_u64().unwrap_or(0),
+                text.as_str().unwrap_or("").to_string(),
+            );
         }
     }
     Ok(map)
@@ -165,13 +193,57 @@ fn load_texts(index: &Path) -> Result<HashMap<u64, String>> {
 
 fn append_texts(index: &Path, entries: &[(u64, String)]) -> Result<()> {
     let path = texts_path(index);
-    let mut file = fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
     for (id, text) in entries {
         serde_json::to_writer(&mut file, &serde_json::json!({"id": id, "text": text}))?;
         use std::io::Write;
         writeln!(&mut file)?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Chunking
+// ---------------------------------------------------------------------------
+
+/// Turn the input file into a list of text chunks based on the chosen strategy.
+fn chunk_file(file: &Path, strategy: &ChunkStrategy, size: usize, overlap: usize) -> Result<Vec<String>> {
+    let content = fs::read_to_string(file)
+        .with_context(|| format!("reading {}", file.display()))?;
+
+    if content.trim().is_empty() {
+        bail!("file is empty: {}", file.display());
+    }
+
+    let texts = match strategy {
+        ChunkStrategy::Line => content
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+
+        ChunkStrategy::Char => {
+            let chunker = CharChunker::new(size, overlap);
+            chunker.chunk(&content).into_iter().map(|c| c.text).collect()
+        }
+
+        ChunkStrategy::Sentence => {
+            let chunker = SentenceChunker::default();
+            chunker.chunk(&content).into_iter().map(|c| c.text).collect()
+        }
+
+        ChunkStrategy::Recursive => {
+            let rules = RecursiveRules::default();
+            let tokenizer = TiktokenTokenizer::new("gpt-4");
+            let chunker = RecursiveChunker::new(size, overlap, rules, tokenizer);
+            chunker.chunk(&content).into_iter().map(|c| c.text).collect()
+        }
+    };
+
+    Ok(texts)
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +264,8 @@ fn build_client(model: &str, provider: Option<&str>, base_url: Option<&str>) -> 
 }
 
 fn flatten_embeddings(embeddings: &[Vec<f32>]) -> Vec<f32> {
-    let mut flat = Vec::with_capacity(embeddings.len() * embeddings.first().map_or(0, |v| v.len()));
+    let mut flat =
+        Vec::with_capacity(embeddings.len() * embeddings.first().map_or(0, |v| v.len()));
     for emb in embeddings {
         flat.extend_from_slice(emb);
     }
@@ -216,9 +289,22 @@ fn cmd_init(index: &Path, dim: usize, bits: usize) -> Result<()> {
 
     // Create empty sidecar files
     fs::File::create(texts_path(index))?;
-    save_meta(index, &IndexMeta { next_id: 1, dim, bits, model: String::new() })?;
+    save_meta(
+        index,
+        &IndexMeta {
+            next_id: 1,
+            dim,
+            bits,
+            model: String::new(),
+        },
+    )?;
 
-    eprintln!("✅ Index created: {} (dim={}, bits={})", index.display(), dim, bits);
+    eprintln!(
+        "✅ Index created: {} (dim={}, bits={})",
+        index.display(),
+        dim,
+        bits
+    );
     Ok(())
 }
 
@@ -229,35 +315,42 @@ async fn cmd_add(
     provider: Option<&str>,
     base_url: Option<&str>,
     batch_size: usize,
+    chunk_strategy: &ChunkStrategy,
+    chunk_size: usize,
+    chunk_overlap: usize,
 ) -> Result<()> {
     if !file.exists() {
         bail!("file not found: {}", file.display());
     }
     if !index.exists() {
-        bail!("index not found: {} (run `init` first)", index.display());
+        bail!(
+            "index not found: {} (run `init` first)",
+            index.display()
+        );
     }
 
-    let texts: Vec<String> = fs::read_to_string(file)?
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
+    let texts = chunk_file(file, chunk_strategy, chunk_size, chunk_overlap)?;
 
     if texts.is_empty() {
-        bail!("no non-empty lines in {}", file.display());
+        bail!("no text produced from {}", file.display());
     }
 
     let mut meta = load_meta(index)?;
     let mut idx = IdMapIndex::load(index).context("loading .tvim index")?;
 
-    eprintln!("📄 {} documents to add (batch_size={})", texts.len(), batch_size);
+    eprintln!(
+        "📄 {} chunks to add (strategy={:?}, batch_size={})",
+        texts.len(),
+        chunk_strategy,
+        batch_size
+    );
 
     let client = build_client(model, provider, base_url)?;
 
     let mut added = 0usize;
-    for chunk in texts.chunks(batch_size) {
+    for batch in texts.chunks(batch_size) {
         let output = client
-            .embed(chunk.to_vec())
+            .embed(batch.to_vec())
             .await
             .context("embedding texts")?;
 
@@ -272,18 +365,22 @@ async fn cmd_add(
             }
         }
 
-        let ids: Vec<u64> = (meta.next_id..meta.next_id + chunk.len() as u64).collect();
+        let ids: Vec<u64> = (meta.next_id..meta.next_id + batch.len() as u64).collect();
         let flat = flatten_embeddings(&output.embeddings);
 
         idx.add_with_ids_2d(&flat, meta.dim, &ids)
             .context("adding vectors to index")?;
 
         // Append texts to sidecar
-        let entries: Vec<(u64, String)> = ids.iter().zip(chunk.iter()).map(|(&id, t)| (id, t.clone())).collect();
+        let entries: Vec<(u64, String)> = ids
+            .iter()
+            .zip(batch.iter())
+            .map(|(&id, t)| (id, t.clone()))
+            .collect();
         append_texts(index, &entries)?;
 
-        meta.next_id += chunk.len() as u64;
-        added += chunk.len();
+        meta.next_id += batch.len() as u64;
+        added += batch.len();
 
         eprintln!("   +{}/{} embedded", added, texts.len());
     }
@@ -293,7 +390,7 @@ async fn cmd_add(
     meta.model = model.to_string();
     save_meta(index, &meta)?;
 
-    eprintln!("✅ Added {added} documents (total: {})", idx.len());
+    eprintln!("✅ Added {added} chunks (total: {})", idx.len());
     Ok(())
 }
 
@@ -318,15 +415,17 @@ async fn cmd_search(
     let client = build_client(model, provider, base_url)?;
 
     let query_vec = client.embed_one(query).await.context("embedding query")?;
-    let query_flat = query_vec;
 
-    let (scores, ids) = idx.search(&query_flat, top_k);
+    let (scores, ids) = idx.search(&query_vec, top_k);
 
     // Build JSON output
     let mut results = Vec::with_capacity(ids.len());
     for (i, &id) in ids.iter().enumerate() {
         let score = scores[i];
-        let text = texts.get(&id).cloned().unwrap_or_else(|| format!("<id {} text missing>", id));
+        let text = texts
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("<id {} text missing>", id));
         results.push(serde_json::json!({
             "id": id,
             "score": score,
@@ -353,7 +452,11 @@ fn cmd_info(index: &Path) -> Result<()> {
     println!("   Dimension:   {}", idx.dim());
     println!("   Vectors:     {}", idx.len());
     println!("   Texts:       {texts_count}");
-    println!("   Index size:  {} bytes ({:.1} KB)", file_size, file_size as f64 / 1024.0);
+    println!(
+        "   Index size:  {} bytes ({:.1} KB)",
+        file_size,
+        file_size as f64 / 1024.0
+    );
     if let Some(m) = meta {
         println!("   Bit width:   {}", m.bits);
         println!("   Model:       {}", m.model);
@@ -372,11 +475,47 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init { index, dim, bits } => cmd_init(&index, dim, bits),
-        Commands::Add { index, file, model, provider, base_url, batch_size } => {
-            cmd_add(&index, &file, &model, provider.as_deref(), base_url.as_deref(), batch_size).await
+        Commands::Add {
+            index,
+            file,
+            model,
+            provider,
+            base_url,
+            batch_size,
+            chunk,
+            chunk_size,
+            chunk_overlap,
+        } => {
+            cmd_add(
+                &index,
+                &file,
+                &model,
+                provider.as_deref(),
+                base_url.as_deref(),
+                batch_size,
+                &chunk,
+                chunk_size,
+                chunk_overlap,
+            )
+            .await
         }
-        Commands::Search { index, query, top_k, model, provider, base_url } => {
-            cmd_search(&index, &query, top_k, &model, provider.as_deref(), base_url.as_deref()).await
+        Commands::Search {
+            index,
+            query,
+            top_k,
+            model,
+            provider,
+            base_url,
+        } => {
+            cmd_search(
+                &index,
+                &query,
+                top_k,
+                &model,
+                provider.as_deref(),
+                base_url.as_deref(),
+            )
+            .await
         }
         Commands::Info { index } => cmd_info(&index),
     }
