@@ -15,4 +15,3 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 filterql = { path = "../filterql", default-features = false, features = ["sql", "json", "validate"] }
 embeddings = { path = "../embeddings" }
 turbovec = "0.8"
-chonkie = { path = "../chonkie" }
