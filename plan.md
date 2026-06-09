@@ -42,7 +42,7 @@ Rules:
 - `vector` or `vectors.<field>` can provide a precomputed vector and skip
   embedding for that record.
 - Precomputed vector dimensions must match the initialized index dimension.
-- If the record does not declare the vector field, `add --vector-field <field>`
+- If the record does not declare the vector field, `import --vector-field <field>`
   can supply a fallback.
 - Fields other than the vector field are stored as metadata.
 - Top-level `id` is stored as `external_id` and also copied into metadata as
@@ -89,7 +89,7 @@ Config:
 The config can be passed as a JSON string or as a path to a JSON file:
 
 ```bash
-turbovec-rs -c '{"data_path":"/tmp/docs.tvim","default_vector_model":"ollama/bge-m3"}' info
+turbovec-rs -c '{"data_path":"/tmp/docs.tvim","default_vector_model":"ollama/bge-m3"}' stats
 ```
 
 ```bash
@@ -115,15 +115,15 @@ explicit CLI flag > config value > built-in default
 Initialize:
 
 ```bash
-turbovec-rs init --index /tmp/docs.tvim --dim 1024
+turbovec-rs init --db /tmp/docs.tvim --dim 1024
 ```
 
 Import:
 
 ```bash
-turbovec-rs add \
-  --index /tmp/docs.tvim \
-  --file docs.jsonl \
+turbovec-rs import \
+  --db /tmp/docs.tvim \
+  --input docs.jsonl \
   --provider ollama \
   --model bge-m3
 ```
@@ -131,9 +131,9 @@ turbovec-rs add \
 Import with fallback vector field:
 
 ```bash
-turbovec-rs add \
-  --index /tmp/docs.tvim \
-  --file docs.jsonl \
+turbovec-rs import \
+  --db /tmp/docs.tvim \
+  --input docs.jsonl \
   --provider ollama \
   --vector-field content
 ```
@@ -142,7 +142,7 @@ Search:
 
 ```bash
 turbovec-rs search \
-  --index /tmp/docs.tvim \
+  --db /tmp/docs.tvim \
   --query "vector search" \
   --provider ollama \
   --filter "lang = 'zh' AND doc = 'guide'"
@@ -152,14 +152,14 @@ Search with a caller-provided query vector:
 
 ```bash
 turbovec-rs search \
-  --index /tmp/docs.tvim \
+  --db /tmp/docs.tvim \
   --vector '[0.1,0.2,0.3]' \
   --filter "lang = 'zh'"
 ```
 
 ```bash
 turbovec-rs search \
-  --index /tmp/docs.tvim \
+  --db /tmp/docs.tvim \
   --vector-file query-vector.json
 ```
 
@@ -167,7 +167,7 @@ Query metadata ids without vector search:
 
 ```bash
 turbovec-rs filter-ids \
-  --index /tmp/docs.tvim \
+  --db /tmp/docs.tvim \
   --filter "lang = 'zh' AND doc = 'guide'"
 ```
 
@@ -212,7 +212,7 @@ Unfiltered search:
 
 ## Non-goals
 
-- No chunking in `turbovec-rs add`.
+- No chunking in `turbovec-rs import`.
 - No BM25 or keyword search in this CLI.
 - No multiple vector fields per record.
 - No metadata storage inside `.tvim`.
