@@ -22,10 +22,16 @@
 //! turbovec-rs info --index /tmp/docs.tvim
 //! ```
 
-use anyhow::{bail, Context, Result};
-use chonkie::{CharChunker, Chunker, RecursiveChunker, RecursiveRules, SentenceChunker, TiktokenTokenizer};
+use anyhow::{anyhow, bail, Context, Result};
+use chonkie::{
+    CharChunker, Chunker, RecursiveChunker, RecursiveRules, SentenceChunker, TiktokenTokenizer,
+};
 use clap::{Parser, Subcommand};
 use embeddings::{resolve_api_key_for_provider, EmbedClient};
+use filterql::validate::{Policy, Schema, ValueType};
+use filterql::{CmpOp, Compile, Value as FilterValue};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{params, params_from_iter, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -102,6 +108,9 @@ enum Commands {
         /// Overlap between chunks in characters
         #[arg(long, default_value_t = 50)]
         chunk_overlap: usize,
+        /// JSON object metadata applied to every inserted chunk
+        #[arg(long, default_value = "{}")]
+        meta: String,
     },
     /// Search the index with a text query
     Search {
@@ -123,6 +132,9 @@ enum Commands {
         /// Custom base URL
         #[arg(long)]
         base_url: Option<String>,
+        /// SQL-like metadata filter, e.g. "source = 'docs' AND lang = 'zh'"
+        #[arg(long)]
+        filter: Option<String>,
     },
     /// Show index metadata
     Info {
@@ -148,6 +160,12 @@ struct IndexMeta {
 fn texts_path(index: &Path) -> PathBuf {
     let mut p = index.to_path_buf();
     p.set_extension("tvim.texts.jsonl");
+    p
+}
+
+fn sqlite_path(index: &Path) -> PathBuf {
+    let mut p = index.to_path_buf();
+    p.set_extension("tvim.sqlite");
     p
 }
 
@@ -205,14 +223,121 @@ fn append_texts(index: &Path, entries: &[(u64, String)]) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct DocRow {
+    text: String,
+    meta: serde_json::Value,
+}
+
+fn parse_meta_json(input: &str) -> Result<serde_json::Value> {
+    let value: serde_json::Value =
+        serde_json::from_str(input).with_context(|| format!("parsing metadata JSON: {input}"))?;
+    if !value.is_object() {
+        bail!("metadata must be a JSON object");
+    }
+    Ok(value)
+}
+
+fn open_sidecar(index: &Path) -> Result<Connection> {
+    let path = sqlite_path(index);
+    let conn = Connection::open(&path)
+        .with_context(|| format!("opening SQLite sidecar {}", path.display()))?;
+    init_sidecar_schema(&conn)?;
+    Ok(conn)
+}
+
+fn init_sidecar_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS docs (
+          id INTEGER PRIMARY KEY,
+          text TEXT NOT NULL,
+          meta TEXT NOT NULL DEFAULT '{}',
+
+          source TEXT GENERATED ALWAYS AS (json_extract(meta, '$.source')) VIRTUAL,
+          lang TEXT GENERATED ALWAYS AS (json_extract(meta, '$.lang')) VIRTUAL,
+          kind TEXT GENERATED ALWAYS AS (json_extract(meta, '$.kind')) VIRTUAL,
+          created_at INTEGER GENERATED ALWAYS AS (json_extract(meta, '$.created_at')) VIRTUAL
+        );
+
+        CREATE INDEX IF NOT EXISTS docs_source_lang ON docs(source, lang);
+        CREATE INDEX IF NOT EXISTS docs_kind ON docs(kind);
+        CREATE INDEX IF NOT EXISTS docs_created_at ON docs(created_at);
+        "#,
+    )
+    .context("initializing SQLite sidecar schema")?;
+    Ok(())
+}
+
+fn insert_doc(conn: &Connection, id: u64, text: &str, meta: &serde_json::Value) -> Result<()> {
+    let id = i64::try_from(id).context("document id does not fit SQLite INTEGER")?;
+    let meta_json = serde_json::to_string(meta)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO docs (id, text, meta) VALUES (?1, ?2, ?3)",
+        params![id, text, meta_json],
+    )
+    .context("inserting document metadata into SQLite sidecar")?;
+    Ok(())
+}
+
+fn sqlite_doc_count(conn: &Connection) -> Result<usize> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM docs", [], |row| row.get(0))?;
+    usize::try_from(count).context("SQLite doc count is negative or too large")
+}
+
+fn load_docs_by_ids(index: &Path, ids: &[u64]) -> Result<HashMap<u64, DocRow>> {
+    let path = sqlite_path(index);
+    if path.exists() {
+        let conn = open_sidecar(index)?;
+        return load_docs_by_ids_sqlite(&conn, ids);
+    }
+
+    let texts = load_texts(index)?;
+    Ok(texts
+        .into_iter()
+        .map(|(id, text)| {
+            (
+                id,
+                DocRow {
+                    text,
+                    meta: serde_json::json!({}),
+                },
+            )
+        })
+        .collect())
+}
+
+fn load_docs_by_ids_sqlite(conn: &Connection, ids: &[u64]) -> Result<HashMap<u64, DocRow>> {
+    let mut docs = HashMap::with_capacity(ids.len());
+    let mut stmt = conn.prepare("SELECT text, meta FROM docs WHERE id = ?1")?;
+    for &id in ids {
+        let sql_id = i64::try_from(id).context("document id does not fit SQLite INTEGER")?;
+        let row = stmt.query_row(params![sql_id], |row| {
+            let text: String = row.get(0)?;
+            let meta_json: String = row.get(1)?;
+            Ok((text, meta_json))
+        });
+        if let Ok((text, meta_json)) = row {
+            let meta = serde_json::from_str(&meta_json).unwrap_or_else(|_| serde_json::json!({}));
+            docs.insert(id, DocRow { text, meta });
+        }
+    }
+    Ok(docs)
+}
+
 // ---------------------------------------------------------------------------
 // Chunking
 // ---------------------------------------------------------------------------
 
 /// Turn the input file into a list of text chunks based on the chosen strategy.
-fn chunk_file(file: &Path, strategy: &ChunkStrategy, size: usize, overlap: usize) -> Result<Vec<String>> {
-    let content = fs::read_to_string(file)
-        .with_context(|| format!("reading {}", file.display()))?;
+fn chunk_file(
+    file: &Path,
+    strategy: &ChunkStrategy,
+    size: usize,
+    overlap: usize,
+) -> Result<Vec<String>> {
+    let content =
+        fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
 
     if content.trim().is_empty() {
         bail!("file is empty: {}", file.display());
@@ -227,19 +352,31 @@ fn chunk_file(file: &Path, strategy: &ChunkStrategy, size: usize, overlap: usize
 
         ChunkStrategy::Char => {
             let chunker = CharChunker::new(size, overlap);
-            chunker.chunk(&content).into_iter().map(|c| c.text).collect()
+            chunker
+                .chunk(&content)
+                .into_iter()
+                .map(|c| c.text)
+                .collect()
         }
 
         ChunkStrategy::Sentence => {
             let chunker = SentenceChunker::default();
-            chunker.chunk(&content).into_iter().map(|c| c.text).collect()
+            chunker
+                .chunk(&content)
+                .into_iter()
+                .map(|c| c.text)
+                .collect()
         }
 
         ChunkStrategy::Recursive => {
             let rules = RecursiveRules::default();
             let tokenizer = TiktokenTokenizer::new("gpt-4");
             let chunker = RecursiveChunker::new(size, overlap, rules, tokenizer);
-            chunker.chunk(&content).into_iter().map(|c| c.text).collect()
+            chunker
+                .chunk(&content)
+                .into_iter()
+                .map(|c| c.text)
+                .collect()
         }
     };
 
@@ -250,7 +387,11 @@ fn chunk_file(file: &Path, strategy: &ChunkStrategy, size: usize, overlap: usize
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn build_client(model: &str, provider: Option<&str>, base_url: Option<&str>) -> Result<EmbedClient> {
+fn build_client(
+    model: &str,
+    provider: Option<&str>,
+    base_url: Option<&str>,
+) -> Result<EmbedClient> {
     let mut client = if let Some(p) = provider {
         let api_key = resolve_api_key_for_provider(p)?;
         EmbedClient::new(p, model, api_key)?
@@ -264,8 +405,7 @@ fn build_client(model: &str, provider: Option<&str>, base_url: Option<&str>) -> 
 }
 
 fn flatten_embeddings(embeddings: &[Vec<f32>]) -> Vec<f32> {
-    let mut flat =
-        Vec::with_capacity(embeddings.len() * embeddings.first().map_or(0, |v| v.len()));
+    let mut flat = Vec::with_capacity(embeddings.len() * embeddings.first().map_or(0, |v| v.len()));
     for emb in embeddings {
         flat.extend_from_slice(emb);
     }
@@ -273,11 +413,215 @@ fn flatten_embeddings(embeddings: &[Vec<f32>]) -> Vec<f32> {
 }
 
 // ---------------------------------------------------------------------------
+// Metadata filter helpers
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct SqliteWhere {
+    clause: String,
+    params: Vec<SqlValue>,
+}
+
+#[derive(Debug, Default)]
+struct SqliteFilterCompiler;
+
+fn filter_schema() -> Schema {
+    Schema::new()
+        .field("source", ValueType::Str)
+        .field("lang", ValueType::Str)
+        .field("kind", ValueType::Str)
+        .field("created_at", ValueType::Int)
+        .strict()
+}
+
+fn filter_policy() -> Policy {
+    Policy::new()
+        .schema(filter_schema())
+        .max_depth(8)
+        .max_comparisons(32)
+        .max_in_list(256)
+}
+
+fn compile_filter(filter: &str) -> Result<SqliteWhere> {
+    let expr = filterql::sql::parse(filter).context("parsing metadata filter")?;
+    filter_policy()
+        .validate(&expr)
+        .map_err(|report| anyhow!("invalid metadata filter:\n{}", report.render()))?;
+    filterql::compile(&expr, &mut SqliteFilterCompiler)
+        .map_err(|err| anyhow!("compiling metadata filter: {err}"))
+}
+
+fn filter_ids(index: &Path, filter: &str) -> Result<Vec<u64>> {
+    let path = sqlite_path(index);
+    if !path.exists() {
+        bail!("metadata filter requires SQLite sidecar {}", path.display());
+    }
+
+    let compiled = compile_filter(filter)?;
+    let conn = open_sidecar(index)?;
+    let sql = if compiled.clause.is_empty() {
+        "SELECT id FROM docs".to_string()
+    } else {
+        format!("SELECT id FROM docs WHERE {}", compiled.clause)
+    };
+    let mut stmt = conn
+        .prepare(&sql)
+        .context("preparing metadata filter query")?;
+    let rows = stmt.query_map(params_from_iter(compiled.params.iter()), |row| {
+        let id: i64 = row.get(0)?;
+        Ok(id)
+    })?;
+
+    let mut ids = Vec::new();
+    for row in rows {
+        let id = row.context("reading filtered document id")?;
+        ids.push(u64::try_from(id).context("SQLite document id is negative")?);
+    }
+    Ok(ids)
+}
+
+fn field_column(field: &str) -> Result<&'static str> {
+    match field {
+        "source" => Ok("source"),
+        "lang" => Ok("lang"),
+        "kind" => Ok("kind"),
+        "created_at" => Ok("created_at"),
+        _ => bail!("unsupported metadata field `{field}`"),
+    }
+}
+
+fn sqlite_value(value: &FilterValue) -> Result<SqlValue> {
+    Ok(match value {
+        FilterValue::Str(s) => SqlValue::Text(s.clone()),
+        FilterValue::Int(n) | FilterValue::Date(n) => SqlValue::Integer(*n),
+        FilterValue::Float(n) => SqlValue::Real(*n),
+        FilterValue::Bool(b) => SqlValue::Integer(i64::from(*b)),
+        FilterValue::Null => SqlValue::Null,
+        FilterValue::List(_) => bail!("list value cannot be bound as a scalar"),
+    })
+}
+
+fn merge_params(mut parts: Vec<SqliteWhere>, separator: &str) -> SqliteWhere {
+    let mut params = Vec::new();
+    let clauses = parts
+        .drain(..)
+        .filter(|part| !part.clause.is_empty())
+        .map(|part| {
+            params.extend(part.params);
+            part.clause
+        })
+        .collect::<Vec<_>>();
+
+    SqliteWhere {
+        clause: if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("({})", clauses.join(separator))
+        },
+        params,
+    }
+}
+
+impl Compile for SqliteFilterCompiler {
+    type Output = SqliteWhere;
+    type Error = anyhow::Error;
+
+    fn and(&mut self, parts: Vec<SqliteWhere>) -> Result<SqliteWhere> {
+        Ok(merge_params(parts, " AND "))
+    }
+
+    fn or(&mut self, parts: Vec<SqliteWhere>) -> Result<SqliteWhere> {
+        if parts.is_empty() {
+            return Ok(SqliteWhere {
+                clause: "(0 = 1)".to_string(),
+                params: Vec::new(),
+            });
+        }
+        Ok(merge_params(parts, " OR "))
+    }
+
+    fn not(&mut self, part: SqliteWhere) -> Result<SqliteWhere> {
+        Ok(SqliteWhere {
+            clause: format!("NOT ({})", part.clause),
+            params: part.params,
+        })
+    }
+
+    fn compare(&mut self, field: &str, op: CmpOp, value: &FilterValue) -> Result<SqliteWhere> {
+        let field = field_column(field)?;
+        match op {
+            CmpOp::Exists => {
+                let present = !matches!(value, FilterValue::Bool(false));
+                Ok(SqliteWhere {
+                    clause: format!("{field} IS {}NULL", if present { "NOT " } else { "" }),
+                    params: Vec::new(),
+                })
+            }
+            CmpOp::Eq if matches!(value, FilterValue::Null) => Ok(SqliteWhere {
+                clause: format!("{field} IS NULL"),
+                params: Vec::new(),
+            }),
+            CmpOp::Ne if matches!(value, FilterValue::Null) => Ok(SqliteWhere {
+                clause: format!("{field} IS NOT NULL"),
+                params: Vec::new(),
+            }),
+            CmpOp::Eq
+            | CmpOp::Ne
+            | CmpOp::Lt
+            | CmpOp::Le
+            | CmpOp::Gt
+            | CmpOp::Ge
+            | CmpOp::Like
+            | CmpOp::NotLike => {
+                let sql_op = match op {
+                    CmpOp::Eq => "=",
+                    CmpOp::Ne => "!=",
+                    CmpOp::Lt => "<",
+                    CmpOp::Le => "<=",
+                    CmpOp::Gt => ">",
+                    CmpOp::Ge => ">=",
+                    CmpOp::Like => "LIKE",
+                    CmpOp::NotLike => "NOT LIKE",
+                    _ => unreachable!(),
+                };
+                Ok(SqliteWhere {
+                    clause: format!("{field} {sql_op} ?"),
+                    params: vec![sqlite_value(value)?],
+                })
+            }
+            CmpOp::In | CmpOp::NotIn => {
+                let FilterValue::List(items) = value else {
+                    bail!("{} requires a list value", op.sql());
+                };
+                if items.is_empty() {
+                    return Ok(SqliteWhere {
+                        clause: if op == CmpOp::In {
+                            "(0 = 1)".to_string()
+                        } else {
+                            "(1 = 1)".to_string()
+                        },
+                        params: Vec::new(),
+                    });
+                }
+
+                let placeholders = vec!["?"; items.len()].join(", ");
+                let sql_op = if op == CmpOp::In { "IN" } else { "NOT IN" };
+                let params = items.iter().map(sqlite_value).collect::<Result<Vec<_>>>()?;
+                Ok(SqliteWhere {
+                    clause: format!("{field} {sql_op} ({placeholders})"),
+                    params,
+                })
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Subcommands
 // ---------------------------------------------------------------------------
 
 fn cmd_init(index: &Path, dim: usize, bits: usize) -> Result<()> {
-    if dim == 0 || dim % 8 != 0 {
+    if dim == 0 || !dim.is_multiple_of(8) {
         bail!("dim must be a positive multiple of 8, got {dim}");
     }
     if ![2, 3, 4].contains(&bits) {
@@ -287,8 +631,8 @@ fn cmd_init(index: &Path, dim: usize, bits: usize) -> Result<()> {
     let idx = IdMapIndex::new(dim, bits).context("creating IdMapIndex")?;
     idx.write(index).context("writing .tvim file")?;
 
-    // Create empty sidecar files
-    fs::File::create(texts_path(index))?;
+    let conn = open_sidecar(index)?;
+    init_sidecar_schema(&conn)?;
     save_meta(
         index,
         &IndexMeta {
@@ -308,27 +652,41 @@ fn cmd_init(index: &Path, dim: usize, bits: usize) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_add(
-    index: &Path,
-    file: &Path,
-    model: &str,
-    provider: Option<&str>,
-    base_url: Option<&str>,
+struct AddOptions<'a> {
+    index: &'a Path,
+    file: &'a Path,
+    model: &'a str,
+    provider: Option<&'a str>,
+    base_url: Option<&'a str>,
     batch_size: usize,
-    chunk_strategy: &ChunkStrategy,
+    chunk_strategy: &'a ChunkStrategy,
     chunk_size: usize,
     chunk_overlap: usize,
-) -> Result<()> {
+    meta_json: &'a str,
+}
+
+async fn cmd_add(opts: AddOptions<'_>) -> Result<()> {
+    let AddOptions {
+        index,
+        file,
+        model,
+        provider,
+        base_url,
+        batch_size,
+        chunk_strategy,
+        chunk_size,
+        chunk_overlap,
+        meta_json,
+    } = opts;
+
     if !file.exists() {
         bail!("file not found: {}", file.display());
     }
     if !index.exists() {
-        bail!(
-            "index not found: {} (run `init` first)",
-            index.display()
-        );
+        bail!("index not found: {} (run `init` first)", index.display());
     }
 
+    let doc_meta = parse_meta_json(meta_json)?;
     let texts = chunk_file(file, chunk_strategy, chunk_size, chunk_overlap)?;
 
     if texts.is_empty() {
@@ -337,6 +695,7 @@ async fn cmd_add(
 
     let mut meta = load_meta(index)?;
     let mut idx = IdMapIndex::load(index).context("loading .tvim index")?;
+    let conn = open_sidecar(index)?;
 
     eprintln!(
         "📄 {} chunks to add (strategy={:?}, batch_size={})",
@@ -377,6 +736,9 @@ async fn cmd_add(
             .zip(batch.iter())
             .map(|(&id, t)| (id, t.clone()))
             .collect();
+        for (&id, text) in ids.iter().zip(batch.iter()) {
+            insert_doc(&conn, id, text, &doc_meta)?;
+        }
         append_texts(index, &entries)?;
 
         meta.next_id += batch.len() as u64;
@@ -401,6 +763,7 @@ async fn cmd_search(
     model: &str,
     provider: Option<&str>,
     base_url: Option<&str>,
+    filter: Option<&str>,
 ) -> Result<()> {
     if !index.exists() {
         bail!("index not found: {}", index.display());
@@ -411,25 +774,45 @@ async fn cmd_search(
         bail!("index is empty (add documents first)");
     }
 
+    let allowlist = if let Some(filter) = filter {
+        let ids = filter_ids(index, filter)?;
+        if ids.is_empty() {
+            println!("[]");
+            return Ok(());
+        }
+        Some(ids)
+    } else {
+        None
+    };
+
     let texts = load_texts(index)?;
     let client = build_client(model, provider, base_url)?;
-
     let query_vec = client.embed_one(query).await.context("embedding query")?;
 
-    let (scores, ids) = idx.search(&query_vec, top_k);
+    let (scores, ids) = if let Some(allowlist) = allowlist.as_deref() {
+        idx.search_with_allowlist(&query_vec, top_k, Some(allowlist))
+    } else {
+        idx.search(&query_vec, top_k)
+    };
 
     // Build JSON output
+    let docs = load_docs_by_ids(index, &ids)?;
     let mut results = Vec::with_capacity(ids.len());
     for (i, &id) in ids.iter().enumerate() {
         let score = scores[i];
-        let text = texts
-            .get(&id)
-            .cloned()
+        let doc = docs.get(&id);
+        let text = doc
+            .map(|doc| doc.text.clone())
+            .or_else(|| texts.get(&id).cloned())
             .unwrap_or_else(|| format!("<id {} text missing>", id));
+        let meta = doc
+            .map(|doc| doc.meta.clone())
+            .unwrap_or_else(|| serde_json::json!({}));
         results.push(serde_json::json!({
             "id": id,
             "score": score,
             "text": text,
+            "meta": meta,
         }));
     }
 
@@ -446,7 +829,12 @@ fn cmd_info(index: &Path) -> Result<()> {
     let meta = load_meta(index).ok();
 
     let file_size = fs::metadata(index)?.len();
-    let texts_count = load_texts(index).map(|t| t.len()).unwrap_or(0);
+    let texts_count = if sqlite_path(index).exists() {
+        let conn = open_sidecar(index)?;
+        sqlite_doc_count(&conn).unwrap_or(0)
+    } else {
+        load_texts(index).map(|t| t.len()).unwrap_or(0)
+    };
 
     println!("📊 Index: {}", index.display());
     println!("   Dimension:   {}", idx.dim());
@@ -485,18 +873,20 @@ async fn main() -> Result<()> {
             chunk,
             chunk_size,
             chunk_overlap,
+            meta,
         } => {
-            cmd_add(
-                &index,
-                &file,
-                &model,
-                provider.as_deref(),
-                base_url.as_deref(),
+            cmd_add(AddOptions {
+                index: &index,
+                file: &file,
+                model: &model,
+                provider: provider.as_deref(),
+                base_url: base_url.as_deref(),
                 batch_size,
-                &chunk,
+                chunk_strategy: &chunk,
                 chunk_size,
                 chunk_overlap,
-            )
+                meta_json: &meta,
+            })
             .await
         }
         Commands::Search {
@@ -506,6 +896,7 @@ async fn main() -> Result<()> {
             model,
             provider,
             base_url,
+            filter,
         } => {
             cmd_search(
                 &index,
@@ -514,9 +905,119 @@ async fn main() -> Result<()> {
                 &model,
                 provider.as_deref(),
                 base_url.as_deref(),
+                filter.as_deref(),
             )
             .await
         }
         Commands::Info { index } => cmd_info(&index),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use filterql::Expr;
+
+    #[test]
+    fn sqlite_path_preserves_tvim_stem() {
+        assert_eq!(
+            sqlite_path(Path::new("/tmp/docs.tvim")),
+            PathBuf::from("/tmp/docs.tvim.sqlite")
+        );
+    }
+
+    #[test]
+    fn metadata_must_be_json_object() {
+        assert!(parse_meta_json(r#"{"source":"docs"}"#).is_ok());
+        assert!(parse_meta_json(r#"["docs"]"#).is_err());
+        assert!(parse_meta_json("not json").is_err());
+    }
+
+    #[test]
+    fn sqlite_schema_initializes_and_counts_docs() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_sidecar_schema(&conn).unwrap();
+        insert_doc(
+            &conn,
+            42,
+            "hello",
+            &serde_json::json!({"source":"docs","lang":"zh"}),
+        )
+        .unwrap();
+        assert_eq!(sqlite_doc_count(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn filter_compiler_uses_placeholders_and_params() {
+        let compiled =
+            compile_filter("source = 'docs' AND lang = 'zh' AND kind IN ('guide','api')").unwrap();
+        assert!(compiled.clause.contains("source = ?"));
+        assert!(compiled.clause.contains("lang = ?"));
+        assert!(compiled.clause.contains("kind IN (?, ?)"));
+        assert_eq!(compiled.params.len(), 4);
+    }
+
+    #[test]
+    fn filter_compiler_rejects_unknown_fields() {
+        let err = compile_filter("secret = 'x'").unwrap_err().to_string();
+        assert!(err.contains("invalid metadata filter"));
+        assert!(err.contains("secret"));
+    }
+
+    #[test]
+    fn filter_ids_queries_sqlite_sidecar() {
+        let index = std::env::temp_dir().join(format!(
+            "turbovec-rs-filter-test-{}-{}.tvim",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let sqlite = sqlite_path(&index);
+        let _ = fs::remove_file(&sqlite);
+
+        let conn = open_sidecar(&index).unwrap();
+        insert_doc(
+            &conn,
+            1,
+            "a",
+            &serde_json::json!({"source":"docs","lang":"zh","kind":"guide","created_at":1700000000}),
+        )
+        .unwrap();
+        insert_doc(
+            &conn,
+            2,
+            "b",
+            &serde_json::json!({"source":"docs","lang":"en","kind":"api","created_at":1700000001}),
+        )
+        .unwrap();
+        drop(conn);
+
+        let ids = filter_ids(
+            &index,
+            "source = 'docs' AND lang = 'zh' AND created_at >= 1700000000",
+        )
+        .unwrap();
+        assert_eq!(ids, vec![1]);
+
+        let _ = fs::remove_file(sqlite);
+    }
+
+    #[test]
+    fn empty_in_lists_have_total_boolean_semantics() {
+        let in_clause = filterql::compile(
+            &Expr::cmp("source", CmpOp::In, FilterValue::List(Vec::new())),
+            &mut SqliteFilterCompiler,
+        )
+        .unwrap();
+        assert_eq!(in_clause.clause, "(0 = 1)");
+
+        let not_in_clause = filterql::compile(
+            &Expr::cmp("source", CmpOp::NotIn, FilterValue::List(Vec::new())),
+            &mut SqliteFilterCompiler,
+        )
+        .unwrap();
+        assert_eq!(not_in_clause.clause, "(1 = 1)");
     }
 }
