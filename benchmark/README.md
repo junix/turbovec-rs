@@ -114,3 +114,74 @@ real 0.04
 real 0.04
 avg  0.0400
 ```
+
+## Recorded 1024-D Compression Result
+
+This result was run on 2026-06-10 after commit:
+
+```text
+4dbf9c7 feat(cli): align interface with zvec
+```
+
+Command shape:
+
+```bash
+cargo build --release
+benchmark/generate_100k_jsonl.sh /tmp/turbovec-100k-1024.tF4GJD 100000 1024
+target/release/turbovec-rs init --db /tmp/turbovec-100k-1024.tF4GJD/perf.tvim --dim 1024
+target/release/turbovec-rs import --db /tmp/turbovec-100k-1024.tF4GJD/perf.tvim --input /tmp/turbovec-100k-1024.tF4GJD/docs-100000.jsonl --batch-size 4096
+```
+
+Dataset:
+
+```text
+records: 100000
+dim: 1024
+bits: 4
+vectors: random precomputed vectors
+jsonl size: 945.40 MiB (991321235 bytes)
+raw fp32 vector size: 390.62 MiB (409600000 bytes)
+.tvim size: 49.98 MiB (52408210 bytes)
+sqlite sidecar: 18.20 MiB (19087360 bytes)
+meta json: 66 bytes
+total persisted size: 68.18 MiB
+filter: tenant = 'tenant_042'
+```
+
+Compression:
+
+```text
+vector index vs raw fp32: 7.82x smaller, 12.79% of raw
+index + sqlite sidecar vs raw fp32: 5.73x smaller, 17.45% of raw
+index + sqlite sidecar vs jsonl: 13.87x smaller, 7.21% of jsonl
+```
+
+Import:
+
+```text
+success: 100000
+errors: 0
+total: 100000
+real 49.24
+user 5.72
+sys 28.64
+```
+
+Search timings use `target/release/turbovec-rs`, query vector from
+`query.json`, and top-k `10`.
+
+No filter:
+
+```text
+real 0.51
+user 0.65
+sys 0.40
+```
+
+With filter:
+
+```text
+real 0.55
+user 0.68
+sys 0.39
+```
