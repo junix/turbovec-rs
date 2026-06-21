@@ -430,3 +430,7 @@ pub(crate) fn filter_ids(index: &Path, filter: &str) -> Result<Vec<u64>> {
     let compiled = compile_filter(filter)?;
     filter_ids_via_sidecar(index, &compiled)
 }
+
+#[cfg(test)]
+#[path = "commands_test.rs"]
+mod tests;
