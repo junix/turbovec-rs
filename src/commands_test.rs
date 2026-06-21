@@ -366,3 +366,68 @@ async fn cmd_search_runs_with_precomputed_vector_and_filter() {
     .await;
     assert!(res.is_ok(), "expected Ok, got: {:?}", res);
 }
+
+// ---- cmd_export ----
+
+#[tokio::test]
+async fn cmd_export_bails_on_include_vectors() {
+    let index = seed_index_for_search("export-inc-vec").await;
+    let err = cmd_export(&index.path, None, None, true)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("--include-vectors is not supported"));
+}
+
+#[tokio::test]
+async fn cmd_export_bails_when_db_missing() {
+    let index = TempIndex::unique("export-missing");
+    let err = cmd_export(&index.path, None, None, false)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("db not found"));
+}
+
+#[tokio::test]
+async fn cmd_export_writes_jsonl_file_with_pk_and_fields() {
+    let index = seed_index_for_search("export-file").await;
+    let out = index.path.with_extension("export.jsonl");
+
+    cmd_export(&index.path, Some(&out), None, false).unwrap();
+
+    let body = fs::read_to_string(&out).unwrap();
+    let lines: Vec<&str> = body.trim().lines().collect();
+    assert_eq!(lines.len(), 2, "expected one record per imported doc");
+
+    let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(first["pk"], "doc-1");
+    // vector_field "content" carries the text; meta carries lang.
+    assert_eq!(first["fields"]["content"], "alpha");
+    assert_eq!(first["fields"]["lang"], "zh");
+    // No raw vector leaked.
+    assert!(first.get("vector").is_none() && first["fields"].get("vector").is_none());
+    let _ = fs::remove_file(out);
+}
+
+#[tokio::test]
+async fn cmd_export_respects_filter() {
+    let index = seed_index_for_search("export-filter").await;
+    let out = index.path.with_extension("export.jsonl");
+
+    cmd_export(&index.path, Some(&out), Some("lang = 'en'"), false).unwrap();
+
+    let body = fs::read_to_string(&out).unwrap();
+    let lines: Vec<&str> = body.trim().lines().collect();
+    assert_eq!(lines.len(), 1);
+    let rec: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(rec["pk"], "doc-2");
+    assert_eq!(rec["fields"]["content"], "beta");
+    let _ = fs::remove_file(out);
+}
+
+#[tokio::test]
+async fn cmd_export_to_stdout_succeeds() {
+    let index = seed_index_for_search("export-stdout").await;
+    // output=None -> stdout writer path; just assert Ok.
+    let res = cmd_export(&index.path, None, None, false);
+    assert!(res.is_ok(), "expected Ok, got: {:?}", res);
+}
