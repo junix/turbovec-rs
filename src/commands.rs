@@ -69,6 +69,79 @@ pub(crate) struct AddOptions<'a> {
     pub(crate) upsert: bool,
 }
 
+/// When `db` is missing, infer the dimension (explicit flag, else first record
+/// with a vector, else 1024) and create a fresh index + sidecar schema.
+fn bootstrap_missing_index(
+    db: &Path,
+    dim: Option<usize>,
+    records: &[crate::import::ImportRecord],
+    bits: usize,
+) -> Result<()> {
+    let inferred_dim = dim
+        .or_else(|| {
+            records
+                .iter()
+                .find_map(|record| record.vector.as_ref().map(Vec::len))
+        })
+        .unwrap_or(1024);
+    create_index(db, inferred_dim, bits)
+}
+
+/// Embed text for every record in `batch_vectors` whose entry is `None`.
+/// Writes the resulting vectors back in place and returns `true` if at least
+/// one embedding call was made (used later to set `meta.model`).
+async fn embed_missing_vectors(
+    client: Option<&embeddings::EmbedClient>,
+    batch: &[crate::import::ImportRecord],
+    batch_vectors: &mut [Option<Vec<f32>>],
+) -> Result<bool> {
+    let embed_indices = batch_vectors
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, vector)| vector.is_none().then_some(idx))
+        .collect::<Vec<_>>();
+    if embed_indices.is_empty() {
+        return Ok(false);
+    }
+    let client = client.ok_or_else(|| {
+        anyhow!("records without vectors require an embedding model")
+    })?;
+    let texts = embed_indices
+        .iter()
+        .map(|&idx| batch[idx].vector_text.clone())
+        .collect::<Vec<_>>();
+    let output = client.embed(texts).await.context("embedding import records")?;
+    if output.embeddings.len() != embed_indices.len() {
+        bail!(
+            "embedding count mismatch: sent {}, received {}",
+            embed_indices.len(),
+            output.embeddings.len()
+        );
+    }
+    for (&idx, vector) in embed_indices.iter().zip(output.embeddings) {
+        batch_vectors[idx] = Some(vector);
+    }
+    Ok(true)
+}
+
+/// Reject any record whose external_id is already present in the sidecar.
+/// turbovec-rs cannot overwrite vectors in-place yet.
+fn ensure_no_external_id_duplicates(
+    conn: &rusqlite::Connection,
+    batch: &[crate::import::ImportRecord],
+) -> Result<()> {
+    for record in batch {
+        if let Some(external_id) = record.external_id.as_deref() {
+            if external_id_exists(conn, external_id)? {
+                bail!(
+                    "primary key `{external_id}` already exists; turbovec-rs cannot overwrite vectors in-place yet"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn cmd_add(opts: AddOptions<'_>) -> Result<()> {
     let AddOptions {
         db,
@@ -98,14 +171,7 @@ pub(crate) async fn cmd_add(opts: AddOptions<'_>) -> Result<()> {
     let records = load_import_records(input, vector_field, text_field)?;
 
     if !db.exists() {
-        let inferred_dim = dim
-            .or_else(|| {
-                records
-                    .iter()
-                    .find_map(|record| record.vector.as_ref().map(Vec::len))
-            })
-            .unwrap_or(1024);
-        create_index(db, inferred_dim, bits)?;
+        bootstrap_missing_index(db, dim, &records, bits)?;
     }
 
     let mut meta = crate::sidecar::load_meta(db)?;
@@ -134,34 +200,8 @@ pub(crate) async fn cmd_add(opts: AddOptions<'_>) -> Result<()> {
             .iter()
             .map(|record| record.vector.clone())
             .collect::<Vec<_>>();
-        let embed_indices = batch_vectors
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, vector)| vector.is_none().then_some(idx))
-            .collect::<Vec<_>>();
 
-        if !embed_indices.is_empty() {
-            let client = client
-                .as_ref()
-                .ok_or_else(|| anyhow!("records without vectors require an embedding model"))?;
-            let texts = embed_indices
-                .iter()
-                .map(|&idx| batch[idx].vector_text.clone())
-                .collect::<Vec<_>>();
-            let output = client
-                .embed(texts)
-                .await
-                .context("embedding import records")?;
-            if output.embeddings.len() != embed_indices.len() {
-                bail!(
-                    "embedding count mismatch: sent {}, received {}",
-                    embed_indices.len(),
-                    output.embeddings.len()
-                );
-            }
-            for (&idx, vector) in embed_indices.iter().zip(output.embeddings) {
-                batch_vectors[idx] = Some(vector);
-            }
+        if embed_missing_vectors(client.as_ref(), batch, &mut batch_vectors).await? {
             used_embedding = true;
         }
 
@@ -171,15 +211,7 @@ pub(crate) async fn cmd_add(opts: AddOptions<'_>) -> Result<()> {
             .ok_or_else(|| anyhow!("missing vector after embedding import batch"))?;
         validate_vectors_dim(&vectors, meta.dim)?;
 
-        for record in batch {
-            if let Some(external_id) = record.external_id.as_deref() {
-                if external_id_exists(&conn, external_id)? {
-                    bail!(
-                        "primary key `{external_id}` already exists; turbovec-rs cannot overwrite vectors in-place yet"
-                    );
-                }
-            }
-        }
+        ensure_no_external_id_duplicates(&conn, batch)?;
 
         let ids: Vec<u64> = (meta.next_id..meta.next_id + batch.len() as u64).collect();
         let flat = flatten_embeddings(&vectors);
