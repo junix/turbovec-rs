@@ -84,3 +84,124 @@ fn normalizes_provider_prefixed_model_when_provider_is_explicit() {
         .to_string();
     assert!(err.contains("conflicts"));
 }
+
+// ---- parse_schema_defaults ----
+
+#[test]
+fn schema_none_returns_empty_defaults() {
+    let defaults = parse_schema_defaults(None).unwrap();
+    assert!(defaults.text_field.is_none());
+    assert!(defaults.vector_field.is_none());
+    assert!(defaults.dim.is_none());
+}
+
+#[test]
+fn schema_requires_fields_array() {
+    let err = parse_schema_defaults(Some(r#"{"foo":"bar"}"#))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("schema JSON must contain fields array"));
+}
+
+#[test]
+fn schema_picks_default_text_field_when_present() {
+    // text field named "text" wins even when other string fields exist.
+    let defaults = parse_schema_defaults(Some(
+        r#"{"fields":[{"name":"text","type":"string"},{"name":"title","type":"string"}]}"#,
+    ))
+    .unwrap();
+    assert_eq!(defaults.text_field.as_deref(), Some("text"));
+}
+
+#[test]
+fn schema_picks_lone_text_field() {
+    let defaults = parse_schema_defaults(Some(
+        r#"{"fields":[{"name":"title","type":"string"}]}"#,
+    ))
+    .unwrap();
+    assert_eq!(defaults.text_field.as_deref(), Some("title"));
+}
+
+#[test]
+fn schema_returns_none_text_field_when_multiple_ambiguous() {
+    let defaults = parse_schema_defaults(Some(
+        r#"{"fields":[{"name":"title","type":"string"},{"name":"abstract","type":"string"}]}"#,
+    ))
+    .unwrap();
+    assert!(defaults.text_field.is_none(), "got {:?}", defaults.text_field);
+}
+
+#[test]
+fn schema_picks_default_vector_field_with_dim() {
+    let defaults = parse_schema_defaults(Some(
+        r#"{"fields":[
+            {"name":"embedding","type":"vector_fp32","dimension":1024},
+            {"name":"content","type":"string"}
+        ]}"#,
+    ))
+    .unwrap();
+    assert_eq!(defaults.vector_field.as_deref(), Some("embedding"));
+    assert_eq!(defaults.dim, Some(1024));
+    assert_eq!(defaults.text_field.as_deref(), Some("content"));
+}
+
+#[test]
+fn schema_picks_lone_vector_field_and_carries_dim() {
+    let defaults = parse_schema_defaults(Some(
+        r#"{"fields":[{"name":"vec","type":"vector_fp32","dimension":768}]}"#,
+    ))
+    .unwrap();
+    assert_eq!(defaults.vector_field.as_deref(), Some("vec"));
+    assert_eq!(defaults.dim, Some(768));
+}
+
+#[test]
+fn schema_returns_none_vector_field_when_multiple_vector_fp32() {
+    let defaults = parse_schema_defaults(Some(
+        r#"{"fields":[
+            {"name":"a","type":"vector_fp32","dimension":8},
+            {"name":"b","type":"vector_fp32","dimension":16}
+        ]}"#,
+    ))
+    .unwrap();
+    assert!(defaults.vector_field.is_none());
+    assert!(defaults.dim.is_none());
+}
+
+#[test]
+fn schema_skips_fields_missing_name_or_type() {
+    // Field missing type and field missing name are silently skipped; the only
+    // valid string field becomes the lone text field.
+    let defaults = parse_schema_defaults(Some(
+        r#"{"fields":[
+            {"name":"untyped"},
+            {"type":"string"},
+            {"name":"content","type":"string"}
+        ]}"#,
+    ))
+    .unwrap();
+    assert_eq!(defaults.text_field.as_deref(), Some("content"));
+    assert!(defaults.vector_field.is_none());
+}
+
+#[test]
+fn schema_loads_from_at_file() {
+    let path = std::env::temp_dir().join(format!(
+        "turbovec-rs-schema-test-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(
+        &path,
+        r#"{"fields":[{"name":"text","type":"string"},{"name":"embedding","type":"vector_fp32","dimension":512}]}"#,
+    )
+    .unwrap();
+    let defaults = parse_schema_defaults(Some(path.to_str().unwrap())).unwrap();
+    assert_eq!(defaults.text_field.as_deref(), Some("text"));
+    assert_eq!(defaults.vector_field.as_deref(), Some("embedding"));
+    assert_eq!(defaults.dim, Some(512));
+    let _ = std::fs::remove_file(path);
+}
