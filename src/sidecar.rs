@@ -183,10 +183,7 @@ pub(crate) fn load_docs_by_ids_sqlite(
 }
 
 /// Resolve ids matching the filter against the SQLite sidecar (used by `filter_ids`).
-pub(crate) fn filter_ids_via_sidecar(
-    index: &Path,
-    compiled: &SqliteWhere,
-) -> Result<Vec<u64>> {
+pub(crate) fn filter_ids_via_sidecar(index: &Path, compiled: &SqliteWhere) -> Result<Vec<u64>> {
     let conn = open_sidecar(index)?;
     let sql = if compiled.clause.is_empty() {
         "SELECT id FROM docs".to_string()
@@ -208,4 +205,3 @@ pub(crate) fn filter_ids_via_sidecar(
     }
     Ok(ids)
 }
-

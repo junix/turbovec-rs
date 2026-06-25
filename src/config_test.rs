@@ -115,10 +115,8 @@ fn schema_picks_default_text_field_when_present() {
 
 #[test]
 fn schema_picks_lone_text_field() {
-    let defaults = parse_schema_defaults(Some(
-        r#"{"fields":[{"name":"title","type":"string"}]}"#,
-    ))
-    .unwrap();
+    let defaults =
+        parse_schema_defaults(Some(r#"{"fields":[{"name":"title","type":"string"}]}"#)).unwrap();
     assert_eq!(defaults.text_field.as_deref(), Some("title"));
 }
 
@@ -128,7 +126,11 @@ fn schema_returns_none_text_field_when_multiple_ambiguous() {
         r#"{"fields":[{"name":"title","type":"string"},{"name":"abstract","type":"string"}]}"#,
     ))
     .unwrap();
-    assert!(defaults.text_field.is_none(), "got {:?}", defaults.text_field);
+    assert!(
+        defaults.text_field.is_none(),
+        "got {:?}",
+        defaults.text_field
+    );
 }
 
 #[test]

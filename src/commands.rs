@@ -103,14 +103,16 @@ async fn embed_missing_vectors(
     if embed_indices.is_empty() {
         return Ok(false);
     }
-    let client = client.ok_or_else(|| {
-        anyhow!("records without vectors require an embedding model")
-    })?;
+    let client =
+        client.ok_or_else(|| anyhow!("records without vectors require an embedding model"))?;
     let texts = embed_indices
         .iter()
         .map(|&idx| batch[idx].vector_text.clone())
         .collect::<Vec<_>>();
-    let output = client.embed(texts).await.context("embedding import records")?;
+    let output = client
+        .embed(texts)
+        .await
+        .context("embedding import records")?;
     if output.embeddings.len() != embed_indices.len() {
         bail!(
             "embedding count mismatch: sent {}, received {}",

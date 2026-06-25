@@ -49,7 +49,15 @@ fn main_init_creates_index_and_emits_json() {
     let index = dir.index();
 
     let output = Command::new(bin())
-        .args(["init", "--db", index.to_str().unwrap(), "--dim", "8", "--bits", "4"])
+        .args([
+            "init",
+            "--db",
+            index.to_str().unwrap(),
+            "--dim",
+            "8",
+            "--bits",
+            "4",
+        ])
         .output()
         .expect("spawn turbovec-rs");
     assert!(output.status.success(), "init failed: {:?}", output);
@@ -71,7 +79,15 @@ fn main_stats_reports_dimension_after_init() {
     let index = dir.index();
 
     let init = Command::new(bin())
-        .args(["init", "--db", index.to_str().unwrap(), "--dim", "8", "--bits", "3"])
+        .args([
+            "init",
+            "--db",
+            index.to_str().unwrap(),
+            "--dim",
+            "8",
+            "--bits",
+            "3",
+        ])
         .output()
         .unwrap();
     assert!(init.status.success(), "init failed: {:?}", init);
