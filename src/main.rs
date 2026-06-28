@@ -59,12 +59,17 @@ struct Cli {
     /// Configuration as a JSON string or path to a JSON config file
     #[arg(short = 'c', long, global = true)]
     config: Option<String>,
+    /// Print a JSON execution plan without writing indexes, reading data input, or calling embedding providers
+    #[arg(long = "dryrun", visible_alias = "dry-run", global = true)]
+    dryrun: bool,
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Describe turbovec-rs commands, flags, and output contract
+    Describe,
     /// Create a new empty index
     Init {
         /// Path to the database/index file (.tvim)
@@ -224,9 +229,19 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Commands::Describe) {
+        emit_describe()?;
+        return Ok(());
+    }
+
     let config = load_config(cli.config.as_deref())?;
+    if cli.dryrun {
+        emit_dryrun(&cli.command, &config)?;
+        return Ok(());
+    }
 
     match cli.command {
+        Commands::Describe => unreachable!("describe handled before config loading"),
         Commands::Init { db, dim, bits } => {
             let db = resolve_db_path(db, &config)?;
             cmd_init(&db, dim, bits)
@@ -343,6 +358,253 @@ async fn main() -> Result<()> {
     }
 }
 
+fn emit_describe() -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "name": "turbovec-rs",
+            "version": env!("CARGO_PKG_VERSION"),
+            "kind": "persistent vector index CLI",
+            "usage": [
+                "turbovec-rs describe",
+                "turbovec-rs init --db <path> [--dryrun]",
+                "turbovec-rs import --db <path> --input <jsonl|-> [--dryrun]",
+                "turbovec-rs search --db <path> (--query <text>|--vector <json>|--vector-file <path>) [--dryrun]",
+                "turbovec-rs query --db-path <path> --sql <sql>",
+                "turbovec-rs export --db <path> [--output <jsonl|->]",
+                "turbovec-rs stats --db <path>"
+            ],
+            "outputs": {
+                "normal": "JSON objects or JSON arrays/JSONL depending on subcommand",
+                "describe": "JSON CLI metadata",
+                "dryrun": "JSON execution plan; no index writes, data import, embedding calls, or server startup"
+            },
+            "json": {
+                "default": true,
+                "note": "All active subcommands emit machine-readable JSON/JSONL on stdout."
+            },
+            "dry_run": {
+                "flag": "--dryrun",
+                "alias": "--dry-run",
+                "does_not": [
+                    "create index files",
+                    "open or mutate sqlite sidecar",
+                    "read import input",
+                    "read --vector-file",
+                    "call embedding providers",
+                    "start REST or MCP servers"
+                ]
+            }
+        }))?
+    );
+    Ok(())
+}
+
+fn emit_dryrun(command: &Commands, config: &config::AppConfig) -> Result<()> {
+    let value = match command {
+        Commands::Describe => unreachable!("describe handled before dry-run"),
+        Commands::Init { db, dim, bits } => {
+            let db = resolve_db_path(db.clone(), config)?;
+            serde_json::json!({
+                "ok": true,
+                "mode": "dry-run",
+                "command": "init",
+                "db": db,
+                "dim": dim,
+                "bits": bits,
+                "would": ["create .tvim index", "create sqlite sidecar", "write metadata"],
+                "did_not": ["create files", "open sqlite sidecar"]
+            })
+        }
+        Commands::Import {
+            db,
+            schema,
+            embedding,
+            input,
+            model,
+            provider,
+            base_url,
+            batch_size,
+            vector_field,
+            text_field,
+            dim,
+            bits,
+            upsert,
+        } => {
+            let db = resolve_db_path(db.clone(), config)?;
+            let embedding_arg = merge_embedding_arg(embedding.clone(), config);
+            let embedding = parse_embedding_config(embedding_arg.as_deref())?;
+            let schema = parse_schema_defaults(schema.as_deref())?;
+            let model = model
+                .clone()
+                .or(embedding.model)
+                .or_else(|| config.default_vector_model.clone());
+            let provider = provider
+                .clone()
+                .or(embedding.provider)
+                .or_else(|| config.provider.clone());
+            let base_url = base_url
+                .clone()
+                .or(embedding.base_url)
+                .or_else(|| config.base_url.clone());
+            let vector_field = vector_field
+                .clone()
+                .or(embedding.vector_field)
+                .or(schema.vector_field);
+            let text_field = text_field
+                .clone()
+                .or(embedding.text_field)
+                .or(schema.text_field);
+            let dim = (*dim).or(embedding.dimensions).or(schema.dim);
+            serde_json::json!({
+                "ok": true,
+                "mode": "dry-run",
+                "command": "import",
+                "db": db,
+                "input": path_plan_value(input.as_ref()),
+                "model": model,
+                "provider": provider,
+                "base_url": base_url,
+                "batch_size": batch_size,
+                "vector_field": vector_field,
+                "text_field": text_field,
+                "dim": dim,
+                "bits": bits,
+                "upsert": upsert,
+                "would": ["read JSONL input", "create missing index if needed", "embed missing vectors", "write vectors and metadata"],
+                "did_not": ["read import input", "call embedding provider", "create or mutate index files"]
+            })
+        }
+        Commands::Search {
+            db,
+            query,
+            vector,
+            vector_file,
+            top_k,
+            model,
+            provider,
+            base_url,
+            filter,
+        } => {
+            let db = resolve_db_path(db.clone(), config)?;
+            if query.is_none() && vector.is_none() && vector_file.is_none() {
+                bail!("provide --query, --vector, or --vector-file");
+            }
+            if let Some(raw_vector) = vector.as_deref() {
+                let _ = load_vector_arg(Some(raw_vector), None)?;
+            }
+            serde_json::json!({
+                "ok": true,
+                "mode": "dry-run",
+                "command": "search",
+                "db": db,
+                "query": query,
+                "vector": vector.as_ref().map(|_| "inline JSON array"),
+                "vector_file": vector_file,
+                "top_k": top_k,
+                "model": resolve_model(model.clone(), config),
+                "provider": resolve_provider(provider.clone(), config),
+                "base_url": resolve_base_url(base_url.clone(), config),
+                "filter": filter,
+                "would": ["open index", "load or compute query vector", "run vector search", "read sidecar metadata"],
+                "did_not": ["open index", "read --vector-file", "call embedding provider"]
+            })
+        }
+        Commands::Query { db_path, sql } => {
+            let db = resolve_db_path(db_path.clone(), config)?;
+            serde_json::json!({
+                "ok": true,
+                "mode": "dry-run",
+                "command": "query",
+                "db": db,
+                "sql": sql,
+                "would": ["open sqlite sidecar", "run metadata query"],
+                "did_not": ["open sqlite sidecar"]
+            })
+        }
+        Commands::Export {
+            db,
+            schema,
+            output,
+            filter,
+            include_vectors,
+        } => {
+            let db = resolve_db_path(db.clone(), config)?;
+            let _ = parse_schema_defaults(schema.as_deref())?;
+            serde_json::json!({
+                "ok": true,
+                "mode": "dry-run",
+                "command": "export",
+                "db": db,
+                "output": path_plan_value(output.as_ref()),
+                "filter": filter,
+                "include_vectors": include_vectors,
+                "would": ["open sqlite sidecar", "write JSONL to output or stdout"],
+                "did_not": ["open sqlite sidecar", "write output file"]
+            })
+        }
+        Commands::FilterIds { db, filter } => {
+            let db = resolve_db_path(db.clone(), config)?;
+            serde_json::json!({
+                "ok": true,
+                "mode": "dry-run",
+                "command": "filter-ids",
+                "db": db,
+                "filter": filter,
+                "would": ["open sqlite sidecar", "compile filter", "return matching ids"],
+                "did_not": ["open sqlite sidecar"]
+            })
+        }
+        Commands::Stats { db } => {
+            let db = resolve_db_path(db.clone(), config)?;
+            serde_json::json!({
+                "ok": true,
+                "mode": "dry-run",
+                "command": "stats",
+                "db": db,
+                "would": ["open index and sidecar metadata"],
+                "did_not": ["open index"]
+            })
+        }
+        Commands::Serve { db_root, bind } => serde_json::json!({
+            "ok": true,
+            "mode": "dry-run",
+            "command": "serve",
+            "db_root": db_root,
+            "bind": bind,
+            "would": ["start REST server"],
+            "did_not": ["bind socket", "start server"]
+        }),
+        Commands::Mcp {
+            db,
+            schema,
+            embedding,
+        } => {
+            let db = resolve_db_path(db.clone(), config)?;
+            let _ = parse_schema_defaults(schema.as_deref())?;
+            let embedding_arg = merge_embedding_arg(embedding.clone(), config);
+            let _ = parse_embedding_config(embedding_arg.as_deref())?;
+            serde_json::json!({
+                "ok": true,
+                "mode": "dry-run",
+                "command": "mcp",
+                "db": db,
+                "would": ["start stdio MCP server"],
+                "did_not": ["start MCP server", "open index"]
+            })
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn path_plan_value(path: Option<&PathBuf>) -> serde_json::Value {
+    match path_arg_to_optional(path.cloned()) {
+        Some(path) => serde_json::json!({"kind": "file", "path": path}),
+        None => serde_json::json!({"kind": "stdio"}),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +628,20 @@ mod tests {
             }
             _ => panic!("expected filter-ids subcommand"),
         }
+    }
+
+    #[test]
+    fn cli_parses_describe_without_db() {
+        let cli = Cli::parse_from(["turbovec-rs", "describe"]);
+        assert!(matches!(cli.command, Commands::Describe));
+    }
+
+    #[test]
+    fn cli_accepts_dryrun_aliases() {
+        let dryrun = Cli::parse_from(["turbovec-rs", "--dryrun", "stats"]);
+        let dry_run = Cli::parse_from(["turbovec-rs", "--dry-run", "stats"]);
+        assert!(dryrun.dryrun);
+        assert!(dry_run.dryrun);
     }
 
     #[test]

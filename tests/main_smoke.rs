@@ -74,6 +74,48 @@ fn main_init_creates_index_and_emits_json() {
 }
 
 #[test]
+fn main_describe_emits_json_without_db() {
+    let output = Command::new(bin())
+        .arg("describe")
+        .output()
+        .expect("spawn turbovec-rs");
+    assert!(output.status.success(), "describe failed: {:?}", output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(json["name"], "turbovec-rs");
+    assert_eq!(json["json"]["default"], true);
+}
+
+#[test]
+fn main_dry_run_init_emits_plan_without_creating_index() {
+    let dir = TempDir::new();
+    let index = dir.index();
+
+    let output = Command::new(bin())
+        .args([
+            "--dry-run",
+            "init",
+            "--db",
+            index.to_str().unwrap(),
+            "--dim",
+            "8",
+            "--bits",
+            "4",
+        ])
+        .output()
+        .expect("spawn turbovec-rs");
+    assert!(output.status.success(), "dry-run init failed: {:?}", output);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(json["mode"], "dry-run");
+    assert_eq!(json["command"], "init");
+    assert!(!index.exists(), ".tvim should not be created by dry-run");
+    assert!(!index.with_extension("tvim.meta.json").exists());
+    assert!(!index.with_extension("tvim.sqlite").exists());
+}
+
+#[test]
 fn main_stats_reports_dimension_after_init() {
     let dir = TempDir::new();
     let index = dir.index();
