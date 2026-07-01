@@ -222,7 +222,8 @@ fn cmd_export_helper_projects_meta_into_fields() {
     };
     let value = doc_to_export_json(42, &doc_no_pk);
     assert_eq!(value["pk"], "42");
-    assert!(value["fields"].as_object().unwrap().contains_key("content"));
+    // meta=Null contributes no keys; only the vector_field text is projected.
+    assert_eq!(value["fields"], serde_json::json!({"content": "x"}));
 }
 
 // ---- cmd_search ----
