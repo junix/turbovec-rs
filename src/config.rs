@@ -223,6 +223,53 @@ pub(crate) fn merge_embedding_arg(cli: Option<String>, config: &AppConfig) -> Op
     cli.or_else(|| config.embedding.clone())
 }
 
+/// Resolved import-field overrides after merging CLI flags, an optional
+/// zvec-style embedding JSON, an optional zvec-style schema JSON, and the
+/// global `AppConfig`. Precedence (highest first):
+/// CLI flag -> embedding JSON -> schema JSON (vector_field/text_field/dim
+/// only) -> AppConfig defaults (model/provider/base_url only).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ImportOverrides {
+    pub(crate) model: Option<String>,
+    pub(crate) provider: Option<String>,
+    pub(crate) base_url: Option<String>,
+    pub(crate) vector_field: Option<String>,
+    pub(crate) text_field: Option<String>,
+    pub(crate) dim: Option<usize>,
+}
+
+pub(crate) fn resolve_import_overrides(
+    schema: Option<String>,
+    embedding: Option<String>,
+    model: Option<String>,
+    provider: Option<String>,
+    base_url: Option<String>,
+    vector_field: Option<String>,
+    text_field: Option<String>,
+    dim: Option<usize>,
+    config: &AppConfig,
+) -> Result<ImportOverrides> {
+    let embedding_arg = merge_embedding_arg(embedding, config);
+    let embedding_cfg = parse_embedding_config(embedding_arg.as_deref())?;
+    let schema = parse_schema_defaults(schema.as_deref())?;
+    Ok(ImportOverrides {
+        model: model
+            .or(embedding_cfg.model)
+            .or_else(|| config.default_vector_model.clone()),
+        provider: provider
+            .or(embedding_cfg.provider)
+            .or_else(|| config.provider.clone()),
+        base_url: base_url
+            .or(embedding_cfg.base_url)
+            .or_else(|| config.base_url.clone()),
+        vector_field: vector_field
+            .or(embedding_cfg.vector_field)
+            .or(schema.vector_field),
+        text_field: text_field.or(embedding_cfg.text_field).or(schema.text_field),
+        dim: dim.or(embedding_cfg.dimensions).or(schema.dim),
+    })
+}
+
 #[cfg(test)]
 #[path = "config_test.rs"]
 mod tests;

@@ -40,7 +40,8 @@ use commands::{
 };
 use config::{
     load_config, merge_embedding_arg, parse_embedding_config, parse_schema_defaults,
-    path_arg_to_optional, resolve_base_url, resolve_db_path, resolve_model, resolve_provider,
+    path_arg_to_optional, resolve_base_url, resolve_db_path, resolve_import_overrides,
+    resolve_model, resolve_provider,
 };
 use import::load_vector_arg;
 use sql_query::cmd_query;
@@ -262,34 +263,21 @@ async fn main() -> Result<()> {
             upsert,
         } => {
             let db = resolve_db_path(db, &config)?;
-            let embedding_arg = merge_embedding_arg(embedding, &config);
-            let embedding = parse_embedding_config(embedding_arg.as_deref())?;
-            let schema = parse_schema_defaults(schema.as_deref())?;
-            let model = model
-                .or(embedding.model)
-                .or_else(|| config.default_vector_model.clone());
-            let provider = provider
-                .or(embedding.provider)
-                .or_else(|| config.provider.clone());
-            let base_url = base_url
-                .or(embedding.base_url)
-                .or_else(|| config.base_url.clone());
-            let vector_field = vector_field
-                .or(embedding.vector_field)
-                .or(schema.vector_field);
-            let text_field = text_field.or(embedding.text_field).or(schema.text_field);
-            let dim = dim.or(embedding.dimensions).or(schema.dim);
+            let overrides = resolve_import_overrides(
+                schema, embedding, model, provider, base_url, vector_field, text_field, dim,
+                &config,
+            )?;
             let input = path_arg_to_optional(input);
             cmd_add(AddOptions {
                 db: &db,
                 input: input.as_deref(),
-                model: model.as_deref(),
-                provider: provider.as_deref(),
-                base_url: base_url.as_deref(),
+                model: overrides.model.as_deref(),
+                provider: overrides.provider.as_deref(),
+                base_url: overrides.base_url.as_deref(),
                 batch_size,
-                vector_field: vector_field.as_deref(),
-                text_field: text_field.as_deref(),
-                dim,
+                vector_field: overrides.vector_field.as_deref(),
+                text_field: overrides.text_field.as_deref(),
+                dim: overrides.dim,
                 bits,
                 upsert,
             })
@@ -432,43 +420,30 @@ fn emit_dryrun(command: &Commands, config: &config::AppConfig) -> Result<()> {
             upsert,
         } => {
             let db = resolve_db_path(db.clone(), config)?;
-            let embedding_arg = merge_embedding_arg(embedding.clone(), config);
-            let embedding = parse_embedding_config(embedding_arg.as_deref())?;
-            let schema = parse_schema_defaults(schema.as_deref())?;
-            let model = model
-                .clone()
-                .or(embedding.model)
-                .or_else(|| config.default_vector_model.clone());
-            let provider = provider
-                .clone()
-                .or(embedding.provider)
-                .or_else(|| config.provider.clone());
-            let base_url = base_url
-                .clone()
-                .or(embedding.base_url)
-                .or_else(|| config.base_url.clone());
-            let vector_field = vector_field
-                .clone()
-                .or(embedding.vector_field)
-                .or(schema.vector_field);
-            let text_field = text_field
-                .clone()
-                .or(embedding.text_field)
-                .or(schema.text_field);
-            let dim = (*dim).or(embedding.dimensions).or(schema.dim);
+            let overrides = resolve_import_overrides(
+                schema.clone(),
+                embedding.clone(),
+                model.clone(),
+                provider.clone(),
+                base_url.clone(),
+                vector_field.clone(),
+                text_field.clone(),
+                *dim,
+                config,
+            )?;
             serde_json::json!({
                 "ok": true,
                 "mode": "dry-run",
                 "command": "import",
                 "db": db,
                 "input": path_plan_value(input.as_ref()),
-                "model": model,
-                "provider": provider,
-                "base_url": base_url,
+                "model": overrides.model,
+                "provider": overrides.provider,
+                "base_url": overrides.base_url,
                 "batch_size": batch_size,
-                "vector_field": vector_field,
-                "text_field": text_field,
-                "dim": dim,
+                "vector_field": overrides.vector_field,
+                "text_field": overrides.text_field,
+                "dim": overrides.dim,
                 "bits": bits,
                 "upsert": upsert,
                 "would": ["read JSONL input", "create missing index if needed", "embed missing vectors", "write vectors and metadata"],
