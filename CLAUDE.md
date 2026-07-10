@@ -16,9 +16,15 @@ cargo build --release          # 唯一构建方式（无 justfile）
 cargo test                     # 单测 + tests/main_smoke.rs 集成冒烟
 cargo test --test main_smoke   # 仅跑二进制端到端冒烟（init/import/search/query/export）
 
-# 安装二进制到架构目录（按 crates/CLAUDE.md 约定）：
-arch_suffix=$(arch)            # arm64 / x86_64 → 按实际判断
-cp target/release/turbovec-rs ~/sync/bin_${arch_suffix}/turbovec-rs
+# 安装二进制到五个平台目录之一；CentOS 先显式设置 SYNC_BIN_DIR：
+case "$(uname -s):$(uname -m)" in
+  Darwin:arm64) platform=macos-arm64 ;; Darwin:x86_64) platform=macos-x86 ;;
+  Linux:aarch64|Linux:arm64) platform=linux-arm64 ;;
+  Linux:x86_64|Linux:amd64) platform=linux-x86 ;;
+  *) echo "unsupported platform" >&2; exit 2 ;;
+esac
+install_bin="${SYNC_BIN_DIR:-$HOME/sync/${platform}-bin}"
+mkdir -p "$install_bin" && cp target/release/turbovec-rs "$install_bin/turbovec-rs"
 ```
 
 `benchmark/` 下是独立的 shell 脚本（生成 100k JSONL + 跑 import/search 计时），

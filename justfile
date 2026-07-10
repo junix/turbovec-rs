@@ -3,10 +3,11 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # 架构后缀：ARM64 → arm64，x86_64 → x86
+os_suffix := if os() == "macos" { "macos" } else { "linux" }
 arch_suffix := if arch() == "aarch64" { "arm64" } else { "x86" }
 
 # 编译型二进制安装目录（按架构隔离，ADR-749）
-install_bin := home_directory() / "sync" / ("bin_" + arch_suffix)
+install_bin := env("SYNC_BIN_DIR", home_directory() / "sync" / (os_suffix + "-" + arch_suffix + "-bin"))
 
 # target 目录：按 cargo metadata 解析实际 target 目录
 target_dir := `cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])'`
@@ -24,7 +25,7 @@ build:
 test:
     cargo test
 
-# 安装到 ~/sync/bin_<arch>/
+# 安装到 ~/sync/<os>-<arch>-bin/
 install: build
     mkdir -p {{ install_bin }}
     cp {{ target_dir }}/release/{{ bin_name }} {{ install_bin }}/{{ bin_name }}
