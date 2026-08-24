@@ -1,0 +1,63 @@
+{
+  "source": "/Users/junix/projects/vector-index/turbovec-rs/docs/architecture-infographic.tex",
+  "workdir": "/Users/junix/projects/vector-index/turbovec-rs",
+  "source_sha256": "31d01e774cbe1ba56d923efd7b9b58d20aa91b8935ae6b6e438818eba5781847",
+  "engine": "xelatex",
+  "engine_version": "XeTeX 3.141592653-2.6-0.999995 (TeX Live 2023)",
+  "dpi": 300,
+  "passes": 2,
+  "transparent_png": false,
+  "shell_escape": false,
+  "warnings": [],
+  "geometry": {
+    "pdf": "/Users/junix/projects/vector-index/turbovec-rs/docs/architecture-infographic.pdf",
+    "page_count": 1,
+    "expected_text": "turbovec-rs",
+    "identity_match": true,
+    "thresholds": {
+      "min_text_pt": 6.5,
+      "min_width_occupancy": 0.45,
+      "min_height_occupancy": 0.3
+    },
+    "pages": [
+      {
+        "page": 1,
+        "width_pt": 505.8,
+        "height_pt": 304.54,
+        "line_count": 27,
+        "text_extent": {
+          "left": 29.827,
+          "top": 21.371,
+          "right": 475.977,
+          "bottom": 274.516
+        },
+        "width_occupancy": 0.8821,
+        "height_occupancy": 0.8312,
+        "overlap_count": 0,
+        "overlap_examples": [],
+        "tiny_text_count": 0,
+        "tiny_text_examples": []
+      }
+    ],
+    "issues": [],
+    "pass": true
+  },
+  "published_despite_strict_failure": false,
+  "artifacts": {
+    "pdf": {
+      "path": "/Users/junix/projects/vector-index/turbovec-rs/docs/architecture-infographic.pdf",
+      "bytes": 39256
+    },
+    "png": {
+      "path": "/Users/junix/projects/vector-index/turbovec-rs/docs/architecture-infographic.png",
+      "bytes": 202501,
+      "width_px": 2108,
+      "height_px": 1269,
+      "width_to_height": 1.6612
+    },
+    "svg": {
+      "path": "/Users/junix/projects/vector-index/turbovec-rs/docs/architecture-infographic.svg",
+      "bytes": 260490
+    }
+  }
+}
