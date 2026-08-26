@@ -1,0 +1,274 @@
+{
+  "schema_version": "repository-architecture-infographic/v1",
+  "meta": {
+    "project": "turbovec-rs",
+    "snapshot": "860311793",
+    "generated": "2026-08-26",
+    "language": "zh-CN",
+    "audience": "新贡献者、架构评审者与下游集成方",
+    "thesis": "把仓库的真实入口、实现分区、可执行用法与验证证据放在一条可回查的阅读路径上。",
+    "canonical_source": "docs/infographics/architecture.svg"
+  },
+  "narrative": {
+    "reader_question": "turbovec-rs 的代码从哪里进入、由哪些分区构成、怎样运行并如何验证？",
+    "order": [
+      "项目指纹",
+      "架构地形",
+      "使用路径",
+      "规模与依赖",
+      "验证与溯源"
+    ],
+    "inference_policy": "文件、计数、命令与依赖是仓库事实；职责名称仅按路径命名归类，均显式标注为推断。"
+  },
+  "sources": {
+    "readme": "README.md",
+    "readme_excerpt": [
+      "Persistent vector index CLI with semantic search — turbovec for 2–4 bit quantized storage, embeddings for query vectorization (Ollama / BGE-M3).",
+      "turbovec-rs 是一个面向本地文档集合的\"持久化向量索引 + 语义检索\"命令行。 底层用 turbovec 的 IdMapIndex 做 2/3/4 bit 量化存储，配一个 SQLite sidecar 存元数据与文档原文；查询时通过 embeddings crate（默认 Ollama 上的 bge-m3，1024 维）把 query 文本向量化，再在量化空间里 找 top-k。"
+    ],
+    "manifests": [
+      "Cargo.toml",
+      "justfile"
+    ],
+    "tracked_file_formula": "git ls-files，排除构建/依赖目录",
+    "line_formula": "逐个已跟踪源码文件统计非空文本行；不等同于语句数或复杂度",
+    "component_formula": "按源码路径首个职责分区聚合；角色名由路径关键词推断",
+    "entrypoint_formula": "按常见入口文件名与 bin/cmd/cli/app 路径定位候选；路径存在是事实，入口职责仍需源码确认"
+  },
+  "facts": {
+    "description": "Persistent vector index CLI with semantic search — turbovec for 2–4 bit quantized storage, embeddings for query vectorization (Ollama / BGE-M3).",
+    "tracked_files": 34,
+    "source_files": 17,
+    "source_nonblank_lines": 3389,
+    "languages": [
+      {
+        "name": "Rust",
+        "files": 15,
+        "nonblank_lines": 3244,
+        "share": 0.9572
+      },
+      {
+        "name": "Shell",
+        "files": 2,
+        "nonblank_lines": 145,
+        "share": 0.0428
+      }
+    ],
+    "entrypoints": [
+      "src/main.rs"
+    ],
+    "components": [
+      {
+        "id": "component-1",
+        "label": "src/main",
+        "role": "入口与编排",
+        "file_count": 1,
+        "nonblank_lines": 621,
+        "examples": [
+          "src/main.rs"
+        ]
+      },
+      {
+        "id": "component-2",
+        "label": "src/commands",
+        "role": "实现分区",
+        "file_count": 1,
+        "nonblank_lines": 419,
+        "examples": [
+          "src/commands.rs"
+        ]
+      },
+      {
+        "id": "component-3",
+        "label": "src/commands_test",
+        "role": "验证边界",
+        "file_count": 1,
+        "nonblank_lines": 392,
+        "examples": [
+          "src/commands_test.rs"
+        ]
+      },
+      {
+        "id": "component-4",
+        "label": "src/config_test",
+        "role": "验证边界",
+        "file_count": 1,
+        "nonblank_lines": 340,
+        "examples": [
+          "src/config_test.rs"
+        ]
+      },
+      {
+        "id": "component-5",
+        "label": "src/import",
+        "role": "实现分区",
+        "file_count": 1,
+        "nonblank_lines": 293,
+        "examples": [
+          "src/import.rs"
+        ]
+      },
+      {
+        "id": "component-6",
+        "label": "src/config",
+        "role": "实现分区",
+        "file_count": 1,
+        "nonblank_lines": 251,
+        "examples": [
+          "src/config.rs"
+        ]
+      },
+      {
+        "id": "component-7",
+        "label": "src/sidecar",
+        "role": "实现分区",
+        "file_count": 1,
+        "nonblank_lines": 186,
+        "examples": [
+          "src/sidecar.rs"
+        ]
+      }
+    ],
+    "static_edges": [
+      {
+        "from": "src/commands",
+        "to": "src/import",
+        "evidence_files": 1,
+        "method": "静态导入/模块声明匹配"
+      },
+      {
+        "from": "src/commands",
+        "to": "src/config",
+        "evidence_files": 1,
+        "method": "静态导入/模块声明匹配"
+      },
+      {
+        "from": "src/commands",
+        "to": "src/sidecar",
+        "evidence_files": 1,
+        "method": "静态导入/模块声明匹配"
+      },
+      {
+        "from": "src/commands_test",
+        "to": "src/sidecar",
+        "evidence_files": 1,
+        "method": "静态导入/模块声明匹配"
+      },
+      {
+        "from": "src/config_test",
+        "to": "src/config",
+        "evidence_files": 1,
+        "method": "静态导入/模块声明匹配"
+      },
+      {
+        "from": "src/import",
+        "to": "src/config",
+        "evidence_files": 1,
+        "method": "静态导入/模块声明匹配"
+      },
+      {
+        "from": "src/main",
+        "to": "src/commands",
+        "evidence_files": 1,
+        "method": "静态导入/模块声明匹配"
+      },
+      {
+        "from": "src/main",
+        "to": "src/import",
+        "evidence_files": 1,
+        "method": "静态导入/模块声明匹配"
+      }
+    ],
+    "dependencies": [
+      "anyhow",
+      "clap",
+      "serde",
+      "serde_json",
+      "tokio",
+      "rusqlite",
+      "filterql",
+      "embeddings",
+      "turbovec"
+    ],
+    "commands": [
+      "just build",
+      "just test",
+      "just install",
+      "just default",
+      "cargo build --release",
+      "cargo test",
+      "just install    # installs to ~/sync/bin_<arch>/",
+      "turbovec-rs init --db /tmp/docs.tvim"
+    ],
+    "test_files": 14,
+    "test_examples": [
+      "spec/00-glossary.md",
+      "spec/01-concept.md",
+      "spec/02-data-model.md",
+      "spec/03-runtime-model.md",
+      "spec/04-interfaces.md",
+      "spec/05-conformance.md",
+      "spec/CHANGELOG.md",
+      "src/commands_test.rs"
+    ],
+    "manifest_count": 2,
+    "largest_files": [
+      {
+        "path": "src/main.rs",
+        "language": "Rust",
+        "lines": 641,
+        "nonblank_lines": 621,
+        "group": "src"
+      },
+      {
+        "path": "src/commands.rs",
+        "language": "Rust",
+        "lines": 470,
+        "nonblank_lines": 419,
+        "group": "src"
+      },
+      {
+        "path": "src/commands_test.rs",
+        "language": "Rust",
+        "lines": 434,
+        "nonblank_lines": 392,
+        "group": "src"
+      },
+      {
+        "path": "src/config_test.rs",
+        "language": "Rust",
+        "lines": 370,
+        "nonblank_lines": 340,
+        "group": "src"
+      },
+      {
+        "path": "src/import.rs",
+        "language": "Rust",
+        "lines": 323,
+        "nonblank_lines": 293,
+        "group": "src"
+      },
+      {
+        "path": "src/config.rs",
+        "language": "Rust",
+        "lines": 275,
+        "nonblank_lines": 251,
+        "group": "src"
+      },
+      {
+        "path": "src/sidecar.rs",
+        "language": "Rust",
+        "lines": 207,
+        "nonblank_lines": 186,
+        "group": "src"
+      },
+      {
+        "path": "src/filter.rs",
+        "language": "Rust",
+        "lines": 204,
+        "nonblank_lines": 185,
+        "group": "src"
+      }
+    ]
+  }
+}
