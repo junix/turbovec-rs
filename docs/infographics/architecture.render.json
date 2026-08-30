@@ -1,52 +1,53 @@
 {
-  "schema_version": "infographic-render/v1",
+  "schema_version": "infographic-render/v2",
   "project": "turbovec-rs",
-  "snapshot": "860311793",
+  "snapshot": "30ef7320d",
   "canonical_source": "architecture.svg",
   "semantic_evidence": "architecture.source.json",
   "dimensions": {
     "svg": [
       2000,
-      2920
+      3000
     ],
     "png": [
       3000,
-      4380
+      4500
     ]
   },
   "artifacts": {
     "architecture.svg": {
-      "sha256": "8de98c796b8abfd6a911a8ac75dc701fbf9be981510feb808aa6e6f01b07f911",
-      "bytes": 24923
+      "sha256": "cb46b3755f6267e21fc46a5afa1ea7f7b76a762a63a972206e42972a09e556f1",
+      "bytes": 25408
     },
     "architecture.png": {
-      "sha256": "8a5ce93a39e5cc0ef46716f4faa2675ad43f9020eed9b2f91c33b829bae0e02a",
-      "bytes": 867017
+      "sha256": "64a4b02a3893f72f7a07a8aaed17c54648526308f62170c2e4bcccf00e1da405",
+      "bytes": 962403
     },
     "architecture.pdf": {
-      "sha256": "836390c1f46e43931a73f140e787ba15fca921acd815f5527e1b6036144f7b03",
-      "bytes": 2314418
+      "sha256": "790aeac893d32c517404a88ca2cd5e533c0ae9bc194f1f33b9cbf742af441430",
+      "bytes": 747231
     },
     "architecture.lint.png": {
-      "sha256": "2f8979f6f2a3cc8aeabda30a5e268b0ee3bb94d2c1378419090c84981cfc086f",
-      "bytes": 182544
+      "sha256": "166bb21943fffa8ca896e2bd7ef68877428ccb6a64fad9b5402c18b991bafbc7",
+      "bytes": 179920
     },
     "architecture.source.json": {
-      "sha256": "f64029f5b2021a7ad80fd9bfcb18b7ef0534d251ab0617fd81df65b2f8da5866",
-      "bytes": 7504
+      "sha256": "f62e293fe23281a5b79e1d0d4a893f84dbef57cadadd3c6bbb46a0c98f402a7f",
+      "bytes": 8389
     }
   },
-  "commands": {
-    "png": "rsvg-convert -w 3000 architecture.svg -o architecture.png",
-    "pdf": "rsvg-convert -f pdf -o architecture.pdf architecture.svg"
+  "renderer": {
+    "provider": "google-chrome",
+    "png": "google-chrome --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1 --window-size=3000,4500 --virtual-time-budget=10000 --screenshot=architecture.png _render-png.html",
+    "pdf": "google-chrome --headless=new --disable-gpu --no-pdf-header-footer --virtual-time-budget=10000 --print-to-pdf=architecture.pdf _render-pdf.html"
   },
   "svg_lint": {
     "tool": "svg-linter 0.1.0",
-    "input_sha256": "8de98c796b8abfd6a911a8ac75dc701fbf9be981510feb808aa6e6f01b07f911",
+    "input_sha256": "cb46b3755f6267e21fc46a5afa1ea7f7b76a762a63a972206e42972a09e556f1",
     "catalog": {
       "schema_version": "svg-linter.catalog/v1",
-      "catalog_version": "3",
-      "catalog_hash": "sha256:9079749fd5985a8f505c2a96c7d7dd90a990fb73f9f295c12620f63c338ac333"
+      "catalog_version": "6",
+      "catalog_hash": "sha256:e6ac3c7137eac03fedf3fb3ea637947bb3207f50e63ea7826d15abff86e4bd7e"
     },
     "passes": {
       "error_gate": {
@@ -149,8 +150,8 @@
   "review": {
     "unannotated_png": "architecture.png",
     "numbered_lint_png": "architecture.lint.png",
-    "template_self_audit": "fixed bands, bounded wrapped text, stable unique IDs, no external resources",
-    "manual_review": "reviewed via six original and six numbered-lint contact sheets plus enlarged extreme-case inspection on 2026-08-26"
+    "template_self_audit": "adaptive bands, drawn static edges only when evidenced, stable unique IDs, no external resources",
+    "manual_review": "pending per-project review (2026-08-30)"
   },
   "replaced": []
 }

@@ -1,12 +1,12 @@
 {
-  "schema_version": "repository-architecture-infographic/v1",
+  "schema_version": "repository-architecture-infographic/v2",
   "meta": {
     "project": "turbovec-rs",
-    "snapshot": "860311793",
-    "generated": "2026-08-26",
+    "snapshot": "30ef7320d",
+    "generated": "2026-08-30",
     "language": "zh-CN",
     "audience": "新贡献者、架构评审者与下游集成方",
-    "thesis": "把仓库的真实入口、实现分区、可执行用法与验证证据放在一条可回查的阅读路径上。",
+    "thesis": "把仓库的真实入口、实现分区、真实依赖与验证证据放在一条可回查的阅读路径上。",
     "canonical_source": "docs/infographics/architecture.svg"
   },
   "narrative": {
@@ -18,13 +18,13 @@
       "规模与依赖",
       "验证与溯源"
     ],
-    "inference_policy": "文件、计数、命令与依赖是仓库事实；职责名称仅按路径命名归类，均显式标注为推断。"
+    "inference_policy": "文件、计数、命令、依赖与最近提交是仓库事实；职责名称仅按路径命名归类，均显式标注为推断。"
   },
   "sources": {
     "readme": "README.md",
     "readme_excerpt": [
-      "Persistent vector index CLI with semantic search — turbovec for 2–4 bit quantized storage, embeddings for query vectorization (Ollama / BGE-M3).",
-      "turbovec-rs 是一个面向本地文档集合的\"持久化向量索引 + 语义检索\"命令行。 底层用 turbovec 的 IdMapIndex 做 2/3/4 bit 量化存储，配一个 SQLite sidecar 存元数据与文档原文；查询时通过 embeddings crate（默认 Ollama 上的 bge-m3，1024 维）把 query 文本向量化，再在量化空间里 找 top-k。"
+      "turbovec-rs 是一个面向本地文档集合的\"持久化向量索引 + 语义检索\"命令行。 底层用 turbovec 的 IdMapIndex 做 2/3/4 bit 量化存储，配一个 SQLite sidecar 存元数据与文档原文；查询时通过 embeddings crate（默认 Ollama 上的 bge-m3，1024 维）把 query 文本向量化，再在量化空间里 找 top-k。",
+      "子命令：init / import / search / query（zvec 风格 SQL 元数据查询）/ export / stats / describe / filter-ids（隐藏）/ serve & mcp（隐藏，暂未实现）。"
     ],
     "manifests": [
       "Cargo.toml",
@@ -33,11 +33,12 @@
     "tracked_file_formula": "git ls-files，排除构建/依赖目录",
     "line_formula": "逐个已跟踪源码文件统计非空文本行；不等同于语句数或复杂度",
     "component_formula": "按源码路径首个职责分区聚合；角色名由路径关键词推断",
-    "entrypoint_formula": "按常见入口文件名与 bin/cmd/cli/app 路径定位候选；路径存在是事实，入口职责仍需源码确认"
+    "entrypoint_formula": "按常见入口文件名与 bin/cmd/cli/app 路径定位候选；路径存在是事实，入口职责仍需源码确认",
+    "edge_formula": "在分区代表源码中静态匹配 import/use/mod/require 与相对路径引用；只绘制两端都能定位的边"
   },
   "facts": {
-    "description": "Persistent vector index CLI with semantic search — turbovec for 2–4 bit quantized storage, embeddings for query vectorization (Ollama / BGE-M3).",
-    "tracked_files": 34,
+    "description": "turbovec-rs 是一个面向本地文档集合的\"持久化向量索引 + 语义检索\"命令行。 底层用 turbovec 的 IdMapIndex 做 2/3/4 bit 量化存储，配一个 SQLite sidecar 存元数据与文档原文；查询时通过 embeddings crate（默认 Ollama 上的 bge-m3，1024 维）把 query 文本向量化，再在量化空间里 找 top-k。",
+    "tracked_files": 41,
     "source_files": 17,
     "source_nonblank_lines": 3389,
     "languages": [
@@ -60,7 +61,7 @@
     "components": [
       {
         "id": "component-1",
-        "label": "src/main",
+        "label": "main",
         "role": "入口与编排",
         "file_count": 1,
         "nonblank_lines": 621,
@@ -70,7 +71,7 @@
       },
       {
         "id": "component-2",
-        "label": "src/commands",
+        "label": "commands",
         "role": "实现分区",
         "file_count": 1,
         "nonblank_lines": 419,
@@ -80,7 +81,7 @@
       },
       {
         "id": "component-3",
-        "label": "src/commands_test",
+        "label": "commands_test",
         "role": "验证边界",
         "file_count": 1,
         "nonblank_lines": 392,
@@ -90,7 +91,7 @@
       },
       {
         "id": "component-4",
-        "label": "src/config_test",
+        "label": "config_test",
         "role": "验证边界",
         "file_count": 1,
         "nonblank_lines": 340,
@@ -100,7 +101,7 @@
       },
       {
         "id": "component-5",
-        "label": "src/import",
+        "label": "import",
         "role": "实现分区",
         "file_count": 1,
         "nonblank_lines": 293,
@@ -110,7 +111,7 @@
       },
       {
         "id": "component-6",
-        "label": "src/config",
+        "label": "config",
         "role": "实现分区",
         "file_count": 1,
         "nonblank_lines": 251,
@@ -120,61 +121,71 @@
       },
       {
         "id": "component-7",
-        "label": "src/sidecar",
+        "label": "sidecar",
         "role": "实现分区",
         "file_count": 1,
         "nonblank_lines": 186,
         "examples": [
           "src/sidecar.rs"
         ]
+      },
+      {
+        "id": "component-8",
+        "label": "filter",
+        "role": "实现分区",
+        "file_count": 1,
+        "nonblank_lines": 185,
+        "examples": [
+          "src/filter.rs"
+        ]
       }
     ],
     "static_edges": [
       {
-        "from": "src/commands",
-        "to": "src/import",
+        "from": "commands",
+        "to": "import",
         "evidence_files": 1,
         "method": "静态导入/模块声明匹配"
       },
       {
-        "from": "src/commands",
-        "to": "src/config",
+        "from": "commands",
+        "to": "config",
         "evidence_files": 1,
         "method": "静态导入/模块声明匹配"
       },
       {
-        "from": "src/commands",
-        "to": "src/sidecar",
+        "from": "commands",
+        "to": "sidecar",
         "evidence_files": 1,
         "method": "静态导入/模块声明匹配"
       },
       {
-        "from": "src/commands_test",
-        "to": "src/sidecar",
+        "from": "commands",
+        "to": "filter",
         "evidence_files": 1,
         "method": "静态导入/模块声明匹配"
       },
       {
-        "from": "src/config_test",
-        "to": "src/config",
+        "from": "commands_test",
+        "to": "sidecar",
         "evidence_files": 1,
         "method": "静态导入/模块声明匹配"
       },
       {
-        "from": "src/import",
-        "to": "src/config",
+        "from": "config_test",
+        "to": "config",
         "evidence_files": 1,
         "method": "静态导入/模块声明匹配"
       },
       {
-        "from": "src/main",
-        "to": "src/commands",
+        "from": "import",
+        "to": "config",
         "evidence_files": 1,
         "method": "静态导入/模块声明匹配"
       },
       {
-        "from": "src/main",
-        "to": "src/import",
+        "from": "import",
+        "to": "filter",
         "evidence_files": 1,
         "method": "静态导入/模块声明匹配"
       }
@@ -199,6 +210,20 @@
       "cargo test",
       "just install    # installs to ~/sync/bin_<arch>/",
       "turbovec-rs init --db /tmp/docs.tvim"
+    ],
+    "recent_commits": [
+      {
+        "date": "2026-08-29",
+        "subject": "docs: 更新架构文档"
+      },
+      {
+        "date": "2026-08-29",
+        "subject": "docs: 架构文档英文内容翻译为中文"
+      },
+      {
+        "date": "2026-08-26",
+        "subject": "docs: relocate architecture infographic to docs/infographics"
+      }
     ],
     "test_files": 14,
     "test_examples": [
