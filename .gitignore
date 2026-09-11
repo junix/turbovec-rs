@@ -4,3 +4,6 @@
 Cargo.lock
 **/*.rs.bk
 *.pdb
+
+# Generated caches, render slices, and numbered lint images (keep final PNG/PDF).
+/docs/infographics/architecture.lint.png
