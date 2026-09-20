@@ -572,6 +572,7 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 [[package]]
 name = "embeddings"
 version = "0.1.0"
+source = "git+https://github.com/junix/embeddings.git#dbfe9c8fbe41f0dd1ce8504de0ccf7e5feb9e63b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -735,10 +736,8 @@ dependencies = [
 
 [[package]]
 name = "filterql"
-version = "0.1.0"
-dependencies = [
- "serde_json",
-]
+version = "0.2.0"
+source = "git+https://github.com/junix/filterql.git#fecf2316cc0e073908c27e3d40a0810eb9f0931a"
 
 [[package]]
 name = "find-msvc-tools"
