@@ -466,5 +466,5 @@ pub(crate) fn filter_ids(index: &Path, filter: &str) -> Result<Vec<u64>> {
 }
 
 #[cfg(test)]
-#[path = "commands_test.rs"]
+#[path = "commands_tests.rs"]
 mod tests;

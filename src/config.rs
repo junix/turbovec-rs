@@ -271,5 +271,5 @@ pub(crate) fn resolve_import_overrides(
 }
 
 #[cfg(test)]
-#[path = "config_test.rs"]
+#[path = "config_tests.rs"]
 mod tests;

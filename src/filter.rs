@@ -200,5 +200,5 @@ where
 }
 
 #[cfg(test)]
-#[path = "filter_test.rs"]
+#[path = "filter_tests.rs"]
 mod tests;

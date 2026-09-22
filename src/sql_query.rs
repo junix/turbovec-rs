@@ -166,5 +166,5 @@ pub(crate) fn cmd_query(db: &Path, sql: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "sql_query_test.rs"]
+#[path = "sql_query_tests.rs"]
 mod tests;

@@ -319,5 +319,5 @@ pub(crate) fn json_scalar_to_string(value: &serde_json::Value) -> Result<String>
 }
 
 #[cfg(test)]
-#[path = "import_test.rs"]
+#[path = "import_tests.rs"]
 mod tests;
