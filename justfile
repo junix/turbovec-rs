@@ -28,8 +28,7 @@ test:
 # 安装到 ~/sync/<os>-<arch>-bin/
 install: build
     mkdir -p {{ install_bin }}
-    cp {{ target_dir }}/release/{{ bin_name }} {{ install_bin }}/{{ bin_name }}
-    codesign -f -s - {{ install_bin }}/{{ bin_name }} 2>/dev/null || true
+    @set -eu; dest="{{ install_bin }}/{{ bin_name }}"; mkdir -p "$(dirname "$dest")"; tmp="$(mktemp "{{ install_bin }}/.{{ bin_name }}.XXXXXX")"; trap 'rm -f "$tmp"' EXIT; cp "{{ target_dir }}/release/{{ bin_name }}" "$tmp"; chmod 755 "$tmp"; if [ "$(uname -s)" = "Darwin" ]; then xattr -c "$tmp" 2>/dev/null || true; codesign --force --sign - "$tmp"; fi; mv -f "$tmp" "$dest"
 
 # Remove local build caches and documentation intermediates.
 clean: clean-artifacts
