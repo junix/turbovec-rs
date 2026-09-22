@@ -264,7 +264,14 @@ async fn main() -> Result<()> {
         } => {
             let db = resolve_db_path(db, &config)?;
             let overrides = resolve_import_overrides(
-                schema, embedding, model, provider, base_url, vector_field, text_field, dim,
+                schema,
+                embedding,
+                model,
+                provider,
+                base_url,
+                vector_field,
+                text_field,
+                dim,
                 &config,
             )?;
             let input = path_arg_to_optional(input);
@@ -583,4 +590,3 @@ fn path_plan_value(path: Option<&PathBuf>) -> serde_json::Value {
 #[cfg(test)]
 #[path = "main_tests.rs"]
 mod tests;
-

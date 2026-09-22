@@ -265,7 +265,9 @@ pub(crate) fn resolve_import_overrides(
         vector_field: vector_field
             .or(embedding_cfg.vector_field)
             .or(schema.vector_field),
-        text_field: text_field.or(embedding_cfg.text_field).or(schema.text_field),
+        text_field: text_field
+            .or(embedding_cfg.text_field)
+            .or(schema.text_field),
         dim: dim.or(embedding_cfg.dimensions).or(schema.dim),
     })
 }

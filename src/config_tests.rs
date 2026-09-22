@@ -217,7 +217,15 @@ fn empty_config() -> AppConfig {
 #[test]
 fn import_overrides_defaults_to_empty_when_nothing_provided() {
     let overrides = resolve_import_overrides(
-        None, None, None, None, None, None, None, None, &empty_config(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &empty_config(),
     )
     .unwrap();
     assert!(overrides.model.is_none());
@@ -326,10 +334,8 @@ fn import_overrides_config_embedding_string_is_merged_via_merge_embedding_arg() 
         embedding: Some(r#"{"model":"from-config-emb"}"#.to_string()),
         ..AppConfig::default()
     };
-    let overrides = resolve_import_overrides(
-        None, None, None, None, None, None, None, None, &config,
-    )
-    .unwrap();
+    let overrides =
+        resolve_import_overrides(None, None, None, None, None, None, None, None, &config).unwrap();
     assert_eq!(overrides.model.as_deref(), Some("from-config-emb"));
 }
 
