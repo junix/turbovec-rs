@@ -50,10 +50,20 @@ use sql_query::cmd_query;
 // CLI definition
 // ---------------------------------------------------------------------------
 
+/// Version with build stamp (ADR-1168): `<semver>+g<sha>[.dirty]` when the
+/// justfile build provides PM_BUILD_SHA, bare semver otherwise.
+fn version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| match option_env!("PM_BUILD_SHA") {
+        Some(stamp) => format!("{}+{}", env!("CARGO_PKG_VERSION"), stamp),
+        None => env!("CARGO_PKG_VERSION").to_string(),
+    })
+}
+
 #[derive(Parser)]
 #[command(
     name = "turbovec-rs",
-    version = "0.1.0",
+    version = version(),
     about = "Persistent vector index with semantic search (turbovec + embeddings)"
 )]
 struct Cli {

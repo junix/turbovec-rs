@@ -182,6 +182,84 @@ impl Compile for SqliteFilterCompiler {
                     params: all_params,
                 })
             }
+            CmpOp::Contains | CmpOp::NotContains => {
+                // Reverse membership: a stored scalar acts as a one-element
+                // list; a list operand requires every element (set
+                // containment). Negation applies only to present fields.
+                let items: Vec<&FilterValue> = match value {
+                    FilterValue::List(items) => items.iter().collect(),
+                    scalar => vec![scalar],
+                };
+                let mut clauses = Vec::with_capacity(items.len());
+                let mut params = Vec::with_capacity(2 * items.len() + 1);
+                for item in items {
+                    clauses
+                        .push("EXISTS (SELECT 1 FROM json_each(meta, ?) AS je WHERE je.value = ?)");
+                    params.push(path.clone());
+                    params.push(sqlite_value(item)?);
+                }
+                let membership = if clauses.is_empty() {
+                    "(1 = 1)".to_string()
+                } else {
+                    clauses.join(" AND ")
+                };
+                if op == CmpOp::Contains {
+                    Ok(SqliteWhere {
+                        clause: format!("({membership})"),
+                        params,
+                    })
+                } else {
+                    params.insert(0, path);
+                    Ok(SqliteWhere {
+                        clause: format!("json_type(meta, ?) IS NOT NULL AND NOT ({membership})"),
+                        params,
+                    })
+                }
+            }
+            CmpOp::ContainsAny | CmpOp::NotContainsAny => {
+                // Set overlap: at least one operand element appears in the
+                // stored value; an empty operand never matches overlap.
+                let FilterValue::List(items) = value else {
+                    bail!("{} requires a list value", op.sql());
+                };
+                if items.is_empty() {
+                    return Ok(SqliteWhere {
+                        clause: if op == CmpOp::ContainsAny {
+                            "(0 = 1)".to_string()
+                        } else {
+                            "json_type(meta, ?) IS NOT NULL".to_string()
+                        },
+                        params: if op == CmpOp::ContainsAny {
+                            Vec::new()
+                        } else {
+                            vec![path]
+                        },
+                    });
+                }
+                let placeholders = vec!["?"; items.len()].join(", ");
+                let values = items.iter().map(sqlite_value).collect::<Result<Vec<_>>>()?;
+                let overlap = format!(
+                    "EXISTS (SELECT 1 FROM json_each(meta, ?) AS je WHERE je.value IN ({placeholders}))"
+                );
+                if op == CmpOp::ContainsAny {
+                    let mut all_params = Vec::with_capacity(values.len() + 1);
+                    all_params.push(path);
+                    all_params.extend(values);
+                    Ok(SqliteWhere {
+                        clause: overlap,
+                        params: all_params,
+                    })
+                } else {
+                    let mut all_params = Vec::with_capacity(values.len() + 2);
+                    all_params.push(path.clone());
+                    all_params.push(path);
+                    all_params.extend(values);
+                    Ok(SqliteWhere {
+                        clause: format!("json_type(meta, ?) IS NOT NULL AND NOT {overlap}"),
+                        params: all_params,
+                    })
+                }
+            }
         }
     }
 }

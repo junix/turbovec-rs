@@ -15,11 +15,14 @@ target_dir := `cargo metadata --format-version 1 --no-deps | python3 -c 'import 
 # 二进制名称
 bin_name := "turbovec-rs"
 
+# 构建印章：git 短 sha + 脏标记（ADR-1168）
+stamp := `git rev-parse --short HEAD` + `(git diff --quiet && git diff --cached --quiet) >/dev/null 2>&1 || printf .dirty`
+
 default: build
 
-# 构建（Release 模式）
+# 构建（Release 模式；PM_BUILD_SHA 嵌入 --version 构建印章）
 build:
-    cargo build --release
+    PM_BUILD_SHA=g{{stamp}} cargo build --release
 
 # 运行测试
 test:
