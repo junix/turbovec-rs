@@ -213,10 +213,10 @@ checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 [[package]]
 name = "cache-fs"
 version = "0.1.0"
-source = "git+https://github.com/junix/cache_fs.git#96f8ca7f889fa86daab23b0006be26bac2c5a838"
+source = "git+https://github.com/junix/cache_fs.git#e71023ce45fa3fadc12cd6dc4b77768e41ac2eb7"
 dependencies = [
  "filetime",
- "libc",
+ "sha2",
  "tempfile",
  "thiserror 1.0.69",
 ]
@@ -572,7 +572,7 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 [[package]]
 name = "embeddings"
 version = "0.1.0"
-source = "git+https://github.com/junix/embeddings.git#dbfe9c8fbe41f0dd1ce8504de0ccf7e5feb9e63b"
+source = "git+https://github.com/junix/embeddings.git#65bd93d0ac34fcdc7d85fff532ef532d0fd5655b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -737,7 +737,7 @@ dependencies = [
 [[package]]
 name = "filterql"
 version = "0.2.0"
-source = "git+https://github.com/junix/filterql.git#fecf2316cc0e073908c27e3d40a0810eb9f0931a"
+source = "git+https://github.com/junix/filterql.git#ef810d750146988c0eaa6283aa355e1ebfcaa7cb"
 
 [[package]]
 name = "find-msvc-tools"
