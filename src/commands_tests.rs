@@ -1,5 +1,5 @@
 use super::*;
-use crate::sidecar::{load_meta, sqlite_path};
+use crate::sidecar::{load_meta, open_sidecar, sqlite_doc_count, sqlite_path};
 use std::fs;
 use std::path::PathBuf;
 
@@ -116,6 +116,136 @@ async fn cmd_add_imports_precomputed_vectors_and_creates_index() {
 
     let idx = turbovec::IdMapIndex::load(&index.path).unwrap();
     assert_eq!(idx.len(), 2);
+}
+
+#[tokio::test]
+async fn cmd_add_imports_multiple_batches_via_streaming_reader() {
+    let index = TempIndex::unique("add-multibatch");
+    let input = index.write_jsonl([
+        r#"{"id":"doc-1","vector_field":"content","fields":{"content":"one"},"vector":[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]}"#,
+        r#"{"id":"doc-2","vector_field":"content","fields":{"content":"two"},"vector":[0.8,0.7,0.6,0.5,0.4,0.3,0.2,0.1]}"#,
+        r#"{"id":"doc-3","vector_field":"content","fields":{"content":"three"},"vector":[0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1]}"#,
+    ]);
+
+    cmd_add(AddOptions {
+        db: &index.path,
+        input: Some(&input),
+        model: None,
+        provider: None,
+        base_url: None,
+        batch_size: 2, // forces a partial final batch of one record
+        vector_field: None,
+        text_field: None,
+        dim: None,
+        bits: 4,
+        upsert: false,
+    })
+    .await
+    .unwrap();
+
+    let meta = load_meta(&index.path).unwrap();
+    assert_eq!(meta.next_id, 4);
+    let idx = turbovec::IdMapIndex::load(&index.path).unwrap();
+    assert_eq!(idx.len(), 3);
+    let conn = open_sidecar(&index.path).unwrap();
+    assert_eq!(sqlite_doc_count(&conn).unwrap(), 3);
+}
+
+#[tokio::test]
+async fn cmd_add_rolls_back_sidecar_docs_when_a_later_batch_fails() {
+    // Seed one doc so the failing run targets a pre-existing index.
+    let index = TempIndex::unique("add-rollback");
+    let seed = index.write_jsonl([
+        r#"{"id":"seed","vector_field":"content","fields":{"content":"seed"},"vector":[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]}"#,
+    ]);
+    cmd_add(AddOptions {
+        db: &index.path,
+        input: Some(&seed),
+        model: None,
+        provider: None,
+        base_url: None,
+        batch_size: 8,
+        vector_field: None,
+        text_field: None,
+        dim: None,
+        bits: 4,
+        upsert: false,
+    })
+    .await
+    .unwrap();
+
+    // Batch 1 would import fine; batch 2 has a dimension mismatch, so the
+    // on-disk index is never rewritten and batch 1's sidecar rows must not
+    // survive either.
+    let bad = index.path.with_extension("bad.jsonl");
+    fs::write(
+        &bad,
+        format!(
+            "{}\n{}\n",
+            r#"{"id":"ok-1","vector_field":"content","fields":{"content":"ok"},"vector":[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]}"#,
+            r#"{"id":"bad-1","vector_field":"content","fields":{"content":"bad"},"vector":[0.1,0.2]}"#
+        ),
+    )
+    .unwrap();
+
+    let err = cmd_add(AddOptions {
+        db: &index.path,
+        input: Some(&bad),
+        model: None,
+        provider: None,
+        base_url: None,
+        batch_size: 1, // one record per batch
+        vector_field: None,
+        text_field: None,
+        dim: None,
+        bits: 4,
+        upsert: false,
+    })
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("vector dimension mismatch"), "got: {err}");
+
+    let conn = open_sidecar(&index.path).unwrap();
+    assert_eq!(
+        sqlite_doc_count(&conn).unwrap(),
+        1,
+        "rolled-back run must leave only the seed doc"
+    );
+    let meta = load_meta(&index.path).unwrap();
+    assert_eq!(meta.next_id, 2);
+    let idx = turbovec::IdMapIndex::load(&index.path).unwrap();
+    assert_eq!(idx.len(), 1);
+    let _ = fs::remove_file(bad);
+}
+
+#[tokio::test]
+async fn cmd_add_bails_on_empty_input_without_creating_index() {
+    let index = TempIndex::unique("add-empty");
+    let input = index.write_jsonl(["", "  "]);
+
+    let err = cmd_add(AddOptions {
+        db: &index.path,
+        input: Some(&input),
+        model: None,
+        provider: None,
+        base_url: None,
+        batch_size: 8,
+        vector_field: None,
+        text_field: None,
+        dim: None,
+        bits: 4,
+        upsert: false,
+    })
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("no JSONL records found"), "got: {err}");
+    assert!(
+        !index.path.exists(),
+        "empty input must not bootstrap an index"
+    );
 }
 
 #[tokio::test]

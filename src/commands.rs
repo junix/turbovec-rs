@@ -9,7 +9,7 @@ use turbovec::IdMapIndex;
 use crate::config::DEFAULT_MODEL;
 use crate::embed::{build_client, flatten_embeddings, validate_vectors_dim};
 use crate::filter::compile_filter;
-use crate::import::load_import_records;
+use crate::import::ImportRecordReader;
 use crate::sidecar::{
     external_id_exists, filter_ids_via_sidecar, init_sidecar_schema, insert_doc, load_docs_by_ids,
     load_docs_by_ids_sqlite, open_sidecar, query_doc_ids, save_meta, DocRow, IndexMeta,
@@ -69,8 +69,9 @@ pub(crate) struct AddOptions<'a> {
     pub(crate) upsert: bool,
 }
 
-/// When `db` is missing, infer the dimension (explicit flag, else first record
-/// with a vector, else 1024) and create a fresh index + sidecar schema.
+/// When `db` is missing, infer the dimension (explicit flag, else the first
+/// record of the leading batch with a vector, else 1024) and create a fresh
+/// index + sidecar schema.
 fn bootstrap_missing_index(
     db: &Path,
     dim: Option<usize>,
@@ -170,78 +171,89 @@ pub(crate) async fn cmd_add(opts: AddOptions<'_>) -> Result<()> {
         );
     }
 
-    let records = load_import_records(input, vector_field, text_field)?;
+    let batch_size = batch_size.max(1);
+    let mut reader = ImportRecordReader::open(input, vector_field, text_field)?;
+    // Prime the first (bounded) batch so index bootstrap can infer dim from
+    // the leading records without loading the whole input.
+    let first_batch = reader
+        .next_batch(batch_size)?
+        .ok_or_else(|| anyhow!("no JSONL records found in {}", reader.source()))?;
 
     if !db.exists() {
-        bootstrap_missing_index(db, dim, &records, bits)?;
+        bootstrap_missing_index(db, dim, &first_batch, bits)?;
     }
 
     let mut meta = crate::sidecar::load_meta(db)?;
     let mut idx = IdMapIndex::load(db).context("loading .tvim index")?;
     let conn = open_sidecar(db)?;
-    let batch_size = batch_size.max(1);
-    let needs_embedding = records.iter().any(|record| record.vector.is_none());
-    let embedding_model = needs_embedding.then(|| model.unwrap_or(DEFAULT_MODEL));
+    let embed_model = model.unwrap_or(DEFAULT_MODEL);
+    let mut client: Option<embeddings::EmbedClient> = None;
     let mut used_embedding = false;
 
     eprintln!(
-        "{} JSONL records to import (batch_size={})",
-        records.len(),
+        "importing JSONL from {} (batch_size={})",
+        reader.source(),
         batch_size
     );
 
-    let client = if let Some(model) = embedding_model {
-        Some(build_client(model, provider, base_url)?)
-    } else {
-        None
-    };
-
+    // Failure policy: an import is atomic per run. Doc rows written by this
+    // run are tracked in `inserted_ids` and rolled back when any batch fails,
+    // so the sidecar never references ids missing from the on-disk index
+    // (which is only rewritten on success). Re-running the same input after a
+    // failure resumes from a clean state.
+    let mut inserted_ids: Vec<u64> = Vec::new();
     let mut added = 0usize;
-    for batch in records.chunks(batch_size) {
-        let mut batch_vectors = batch
-            .iter()
-            .map(|record| record.vector.clone())
-            .collect::<Vec<_>>();
-
-        if embed_missing_vectors(client.as_ref(), batch, &mut batch_vectors).await? {
-            used_embedding = true;
+    let mut failure: Option<anyhow::Error> = None;
+    let mut pending = Some(first_batch);
+    while let Some(batch) = pending.take() {
+        match import_one_batch(
+            &mut client,
+            embed_model,
+            provider,
+            base_url,
+            &batch,
+            &mut idx,
+            &conn,
+            &mut meta,
+            &mut inserted_ids,
+        )
+        .await
+        {
+            Ok(embedded) => {
+                used_embedding |= embedded;
+                added += batch.len();
+                eprintln!("+{added} imported");
+            }
+            Err(err) => {
+                failure = Some(err);
+                break;
+            }
         }
-
-        let vectors = batch_vectors
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| anyhow!("missing vector after embedding import batch"))?;
-        validate_vectors_dim(&vectors, meta.dim)?;
-
-        ensure_no_external_id_duplicates(&conn, batch)?;
-
-        let ids: Vec<u64> = (meta.next_id..meta.next_id + batch.len() as u64).collect();
-        let flat = flatten_embeddings(&vectors);
-
-        idx.add_with_ids_2d(&flat, meta.dim, &ids)
-            .context("adding vectors to index")?;
-
-        for (&id, record) in ids.iter().zip(batch.iter()) {
-            insert_doc(
-                &conn,
-                id,
-                record.external_id.as_deref(),
-                &record.vector_field,
-                &record.vector_text,
-                &record.meta,
-            )?;
+        match reader.next_batch(batch_size) {
+            Ok(next) => pending = next,
+            Err(err) => {
+                failure = Some(err);
+                break;
+            }
         }
-
-        meta.next_id += batch.len() as u64;
-        added += batch.len();
-
-        eprintln!("+{}/{} imported", added, records.len());
+    }
+    if let Some(err) = failure {
+        if !inserted_ids.is_empty() {
+            let rolled_back = inserted_ids.len();
+            match crate::sidecar::delete_docs(&conn, &inserted_ids) {
+                Ok(_) => eprintln!("import failed; rolled back {rolled_back} sidecar docs"),
+                Err(rollback_err) => eprintln!(
+                    "warning: rollback of {rolled_back} imported docs failed: {rollback_err}"
+                ),
+            }
+        }
+        return Err(err);
     }
 
     // Persist index and meta
     idx.write(db).context("writing index")?;
     if used_embedding {
-        meta.model = embedding_model.unwrap_or(DEFAULT_MODEL).to_string();
+        meta.model = embed_model.to_string();
     } else if let Some(model) = model {
         meta.model = model.to_string();
     }
@@ -256,6 +268,63 @@ pub(crate) async fn cmd_add(opts: AddOptions<'_>) -> Result<()> {
         }))?
     );
     Ok(())
+}
+
+/// Import one batch: build the embedding client lazily on first need, embed
+/// records without vectors, validate dimensions, reject duplicate external
+/// ids, append vectors to the in-memory index, and write sidecar rows. Every
+/// inserted doc id is appended to `inserted_ids` so a failure in a later
+/// batch can roll this run's sidecar writes back. Returns whether an
+/// embedding call was made for this batch.
+async fn import_one_batch(
+    client: &mut Option<embeddings::EmbedClient>,
+    embed_model: &str,
+    provider: Option<&str>,
+    base_url: Option<&str>,
+    batch: &[crate::import::ImportRecord],
+    idx: &mut IdMapIndex,
+    conn: &rusqlite::Connection,
+    meta: &mut IndexMeta,
+    inserted_ids: &mut Vec<u64>,
+) -> Result<bool> {
+    let mut batch_vectors = batch
+        .iter()
+        .map(|record| record.vector.clone())
+        .collect::<Vec<_>>();
+
+    if batch.iter().any(|record| record.vector.is_none()) && client.is_none() {
+        *client = Some(build_client(embed_model, provider, base_url)?);
+    }
+    let used_embedding = embed_missing_vectors(client.as_ref(), batch, &mut batch_vectors).await?;
+
+    let vectors = batch_vectors
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| anyhow!("missing vector after embedding import batch"))?;
+    validate_vectors_dim(&vectors, meta.dim)?;
+
+    ensure_no_external_id_duplicates(conn, batch)?;
+
+    let ids: Vec<u64> = (meta.next_id..meta.next_id + batch.len() as u64).collect();
+    let flat = flatten_embeddings(&vectors);
+
+    idx.add_with_ids_2d(&flat, meta.dim, &ids)
+        .context("adding vectors to index")?;
+
+    for (&id, record) in ids.iter().zip(batch.iter()) {
+        insert_doc(
+            conn,
+            id,
+            record.external_id.as_deref(),
+            &record.vector_field,
+            &record.vector_text,
+            &record.meta,
+        )?;
+        inserted_ids.push(id);
+    }
+
+    meta.next_id += batch.len() as u64;
+    Ok(used_embedding)
 }
 
 pub(crate) struct SearchOptions<'a> {

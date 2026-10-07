@@ -2,11 +2,19 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
 
 use crate::config::DEFAULT_TEXT_FIELD;
 use crate::filter::validate_meta_field_name;
+
+/// Upper bound for a single JSONL line. Longer lines fail with a clear error
+/// instead of ballooning memory.
+pub(crate) const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Capacity of the streaming reader's internal buffer; input larger than this
+/// is consumed incrementally, one bounded line at a time.
+const READER_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ImportRecord {
@@ -17,39 +25,115 @@ pub(crate) struct ImportRecord {
     pub(crate) meta: serde_json::Value,
 }
 
-pub(crate) fn load_import_records(
-    input: Option<&Path>,
-    fallback_vector_field: Option<&str>,
-    fallback_text_field: Option<&str>,
-) -> Result<Vec<ImportRecord>> {
-    let (source, content) = match input {
-        Some(path) => (
-            path.display().to_string(),
-            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
-        ),
-        None => {
-            let mut content = String::new();
-            io::stdin()
-                .read_to_string(&mut content)
-                .context("reading JSONL from stdin")?;
-            ("stdin".to_string(), content)
-        }
-    };
-    let mut records = Vec::new();
-    for (line_idx, line) in content.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        records.push(
-            parse_import_record(line, fallback_vector_field, fallback_text_field)
-                .with_context(|| format!("parsing {source} line {}", line_idx + 1))?,
-        );
+/// Bounded JSONL reader: yields parsed [`ImportRecord`]s one line at a time
+/// (or in fixed-size batches) without loading the whole file/stdin into
+/// memory. Peak memory is the reader buffer plus one line plus one batch.
+pub(crate) struct ImportRecordReader {
+    source: String,
+    fallback_vector_field: Option<String>,
+    fallback_text_field: Option<String>,
+    line_no: usize,
+    reader: BufReader<Box<dyn Read>>,
+}
+
+impl ImportRecordReader {
+    pub(crate) fn open(
+        input: Option<&Path>,
+        fallback_vector_field: Option<&str>,
+        fallback_text_field: Option<&str>,
+    ) -> Result<Self> {
+        let (source, inner): (String, Box<dyn Read>) = match input {
+            Some(path) => (
+                path.display().to_string(),
+                Box::new(
+                    fs::File::open(path).with_context(|| format!("opening {}", path.display()))?,
+                ),
+            ),
+            None => ("stdin".to_string(), Box::new(io::stdin())),
+        };
+        Ok(Self {
+            source,
+            fallback_vector_field: fallback_vector_field.map(str::to_string),
+            fallback_text_field: fallback_text_field.map(str::to_string),
+            line_no: 0,
+            reader: BufReader::with_capacity(READER_BUFFER_BYTES, inner),
+        })
     }
-    if records.is_empty() {
-        bail!("no JSONL records found in {source}");
+
+    /// Human-readable input label ("stdin" or the file path).
+    pub(crate) fn source(&self) -> &str {
+        &self.source
     }
-    Ok(records)
+
+    /// Next parsed record; `Ok(None)` at end of input. Errors carry 1-based
+    /// line numbers counting every physical line (blank lines included).
+    pub(crate) fn next_record(&mut self) -> Result<Option<ImportRecord>> {
+        loop {
+            let line = match self.next_line()? {
+                Some(line) => line,
+                None => return Ok(None),
+            };
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let record = parse_import_record(
+                line,
+                self.fallback_vector_field.as_deref(),
+                self.fallback_text_field.as_deref(),
+            )
+            .with_context(|| format!("parsing {} line {}", self.source, self.line_no))?;
+            return Ok(Some(record));
+        }
+    }
+
+    /// Next up to `batch_size` records as one bounded batch; `Ok(None)` at
+    /// end of input. Never returns an empty batch.
+    pub(crate) fn next_batch(&mut self, batch_size: usize) -> Result<Option<Vec<ImportRecord>>> {
+        let batch_size = batch_size.max(1);
+        let mut batch = Vec::new();
+        while batch.len() < batch_size {
+            match self.next_record()? {
+                Some(record) => batch.push(record),
+                None => break,
+            }
+        }
+        if batch.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(batch))
+        }
+    }
+
+    /// Read the next physical line (newline included), enforcing the
+    /// per-line byte cap so a pathologically long line cannot balloon memory.
+    /// Returns `Ok(None)` at end of input.
+    fn next_line(&mut self) -> Result<Option<String>> {
+        let mut raw: Vec<u8> = Vec::new();
+        let n = (&mut self.reader)
+            .take(MAX_LINE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut raw)
+            .with_context(|| format!("reading {}", self.source))?;
+        if n == 0 {
+            return Ok(None);
+        }
+        self.line_no += 1;
+        if raw.len() > MAX_LINE_BYTES {
+            bail!(
+                "line {} of {} exceeds the {}-byte JSONL line limit",
+                self.line_no,
+                self.source,
+                MAX_LINE_BYTES
+            );
+        }
+        let line = String::from_utf8(raw).with_context(|| {
+            format!(
+                "line {} of {} is not valid UTF-8",
+                self.line_no, self.source
+            )
+        })?;
+        Ok(Some(line))
+    }
 }
 
 pub(crate) fn parse_import_record(

@@ -104,6 +104,22 @@ pub(crate) fn insert_doc(
     Ok(())
 }
 
+/// Delete document rows for `ids`; used to roll back a failed import run so
+/// the sidecar never references ids missing from the on-disk index.
+pub(crate) fn delete_docs(conn: &Connection, ids: &[u64]) -> Result<usize> {
+    let mut stmt = conn
+        .prepare("DELETE FROM docs WHERE id = ?1")
+        .context("preparing document delete statement")?;
+    let mut deleted = 0usize;
+    for &id in ids {
+        let sql_id = i64::try_from(id).context("document id does not fit SQLite INTEGER")?;
+        deleted += stmt
+            .execute(params![sql_id])
+            .context("deleting rolled-back document")?;
+    }
+    Ok(deleted)
+}
+
 pub(crate) fn sqlite_doc_count(conn: &Connection) -> Result<usize> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM docs", [], |row| row.get(0))?;
     usize::try_from(count).context("SQLite doc count is negative or too large")
